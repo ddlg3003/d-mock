@@ -1,0 +1,30 @@
+name: timeout — partner never decides, order cancelled at the partner
+vars:
+  order: "ord-${run}-3"
+  api: "http://localhost:18080"
+
+steps:
+  - name: create order (partner stays PENDING, its default state)
+    http: { method: POST, url: "${vars.api}/orders", json: { id: "${vars.order}" } }
+    expect: { status: 201 }
+
+  - name: late polls time out at the partner
+    mock: { name: partner, fault: { key: "${vars.order}", fault: timeout } }
+
+  - name: order cancelled after the 8s approval timeout
+    http: { url: "${vars.api}/orders/${vars.order}" }
+    retry: { timeout: 20s, every: 1s }
+    expect: { json.status: CANCELLED, json.decided_by: timeout }
+
+  - name: cancel sent to the partner exactly once
+    mock: { name: partner, calls: { route: cancel, key: "${vars.order}" } }
+    retry: { timeout: 5s, every: 500ms }
+    expect: { count: 1, calls.0.method: POST }
+
+  - name: a late callback does not overwrite the cancel
+    http: { method: POST, url: "${vars.api}/callback", json: { id: "${vars.order}", status: APPROVED } }
+    expect: { json.applied: false }
+
+  - name: still cancelled
+    http: { url: "${vars.api}/orders/${vars.order}" }
+    expect: { json.status: CANCELLED }

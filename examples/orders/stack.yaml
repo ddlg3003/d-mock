@@ -1,0 +1,27 @@
+project: orders-example
+
+deps:
+  redis:
+    kind: redis
+    mode: container            # switch with: dmock --mode redis=remote ...
+    container:
+      image: redis:7.2.4
+      ports: ["16379:6379"]
+      vars: { addr: "localhost:16379" }
+    remote:
+      vars: { addr: "${env.ORDERS_REDIS_ADDR}" }
+    ready: { tcp: "localhost:16379", timeout: 30s }
+
+mocks:
+  partner:
+    spec: mocks/partner.yaml
+    port: 13001
+
+services:
+  orders:
+    dir: toy
+    cmd: ["go", "run", "."]
+    env: { ORDERS_CONFIG: "${services.orders.config}" }
+    config: { template: toy/config.tmpl.yaml }
+    ready: { http: "http://localhost:18080/healthz", timeout: 90s }
+    depends_on: [redis, partner]

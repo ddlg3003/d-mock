@@ -1,0 +1,28 @@
+name: signal path — callback decides before any poll
+vars:
+  order: "ord-${run}-1"
+  api: "http://localhost:18080"
+
+steps:
+  - name: create order
+    http: { method: POST, url: "${vars.api}/orders", json: { id: "${vars.order}" } }
+    expect: { status: 201, json.status: WAITING }
+
+  - name: partner calls back APPROVED (before the 3s poll delay)
+    http: { method: POST, url: "${vars.api}/callback", json: { id: "${vars.order}", status: APPROVED } }
+    expect: { status: 200, json.applied: true }
+
+  - name: order approved by the callback
+    http: { url: "${vars.api}/orders/${vars.order}" }
+    expect: { json.status: APPROVED, json.decided_by: callback }
+
+  - name: wait past the poll delay
+    sleep: 4s
+
+  - name: the partner was never polled
+    mock: { name: partner, calls: { route: status, key: "${vars.order}" } }
+    expect: { count: 0 }
+
+  - name: the service logged the signal path
+    log: { service: orders, grep: "order=${vars.order} decided by signal" }
+    expect: { count: 1 }

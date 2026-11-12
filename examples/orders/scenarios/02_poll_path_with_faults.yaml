@@ -1,0 +1,36 @@
+name: poll path — partner fails twice, then approves
+vars:
+  order: "ord-${run}-2"
+  api: "http://localhost:18080"
+
+steps:
+  - name: partner answers HTTP 500 for the next 2 polls
+    mock: { name: partner, fault: { key: "${vars.order}", fault: http500, times: 2 } }
+
+  - name: partner has approved
+    mock: { name: partner, set: { key: "${vars.order}", state: { status: APPROVED } } }
+
+  - name: create order (no callback will come)
+    http: { method: POST, url: "${vars.api}/orders", json: { id: "${vars.order}" } }
+    expect: { status: 201 }
+
+  - name: order approved by polling
+    http: { url: "${vars.api}/orders/${vars.order}" }
+    retry: { timeout: 15s, every: 500ms }
+    expect: { json.status: APPROVED, json.decided_by: poll }
+
+  - name: exactly 3 polls (500, 500, 200)
+    mock: { name: partner, calls: { route: status, key: "${vars.order}" } }
+    expect:
+      count: 3
+      calls.0.status: 500
+      calls.1.status: 500
+      calls.2.status: 200
+
+  - name: the service retried through both errors
+    log: { service: orders, grep: "order=${vars.order} partner error: HTTP 500" }
+    expect: { count: 2 }
+
+  - name: no cancel was sent
+    mock: { name: partner, calls: { route: cancel, key: "${vars.order}" } }
+    expect: { count: 0 }

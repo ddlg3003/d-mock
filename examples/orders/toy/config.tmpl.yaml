@@ -1,0 +1,7 @@
+# Rendered by d-mock into .dmock/rendered/orders.yaml before the service starts.
+listen: "localhost:18080"
+redis_addr: "${deps.redis.addr}"
+partner_url: "${mocks.partner.url}"
+poll_delay: 3s
+poll_every: 1s
+approval_timeout: 8s
