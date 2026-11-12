@@ -1,4 +1,4 @@
-module d-mock
+module github.com/ddlg3003/d-mock
 
 go 1.25.0
 

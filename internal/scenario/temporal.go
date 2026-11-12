@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"d-mock/internal/tmpl"
+	"github.com/ddlg3003/d-mock/internal/tmpl"
 )
 
 // temporal steps shell out to the `temporal` CLI, so no SDK or proto version is pinned here.

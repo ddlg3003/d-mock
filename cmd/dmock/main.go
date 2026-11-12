@@ -16,10 +16,10 @@ import (
 	"strconv"
 	"strings"
 
-	"d-mock/internal/config"
-	"d-mock/internal/mock"
-	"d-mock/internal/scenario"
-	"d-mock/internal/stack"
+	"github.com/ddlg3003/d-mock/internal/config"
+	"github.com/ddlg3003/d-mock/internal/mock"
+	"github.com/ddlg3003/d-mock/internal/scenario"
+	"github.com/ddlg3003/d-mock/internal/stack"
 )
 
 const usage = `dmock — local integration-test harness (stack + Mockoon mocks + YAML scenarios)

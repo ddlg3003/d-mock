@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"d-mock/internal/tmpl"
+	"github.com/ddlg3003/d-mock/internal/tmpl"
 )
 
 // Check evaluates expect against a step result. Each key is a dotted path into the result;

@@ -21,7 +21,7 @@ Each dep can run differently on each run. For example, Kafka and MySQL can use a
 ## Install
 
 ```bash
-go install ./cmd/dmock          # or: make build  → bin/dmock
+go install github.com/ddlg3003/d-mock/cmd/dmock@latest   # or: make build  → bin/dmock
 npm i -g @mockoon/cli@9.10.0    # mock engine (or set mockoon.runner: docker)
 brew install temporal           # only needed for temporal steps
 ```

@@ -19,9 +19,9 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/segmentio/kafka-go"
 
-	"d-mock/internal/config"
-	"d-mock/internal/mock"
-	"d-mock/internal/tmpl"
+	"github.com/ddlg3003/d-mock/internal/config"
+	"github.com/ddlg3003/d-mock/internal/mock"
+	"github.com/ddlg3003/d-mock/internal/tmpl"
 )
 
 func str(args map[string]any, k string) string { return tmpl.Stringify(args[k]) }

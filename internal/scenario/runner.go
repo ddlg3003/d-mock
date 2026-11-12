@@ -8,8 +8,8 @@ import (
 	"os"
 	"time"
 
-	"d-mock/internal/stack"
-	"d-mock/internal/tmpl"
+	"github.com/ddlg3003/d-mock/internal/stack"
+	"github.com/ddlg3003/d-mock/internal/tmpl"
 )
 
 // StepResult is one executed step in the report.

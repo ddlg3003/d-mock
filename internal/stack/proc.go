@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"d-mock/internal/config"
+	"github.com/ddlg3003/d-mock/internal/config"
 )
 
 // startProcess runs cmd detached in its own process group, output appended to logPath.

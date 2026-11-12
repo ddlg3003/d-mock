@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
-	"d-mock/internal/config"
-	"d-mock/internal/mock"
-	"d-mock/internal/tmpl"
+	"github.com/ddlg3003/d-mock/internal/config"
+	"github.com/ddlg3003/d-mock/internal/mock"
+	"github.com/ddlg3003/d-mock/internal/tmpl"
 )
 
 // Item is one line of up/down/status output.
