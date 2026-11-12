@@ -150,6 +150,9 @@ func (a *Admin) Calls(spec *Spec) ([]Call, error) {
 	}
 	calls := make([]Call, 0, len(txs))
 	for _, t := range txs {
+		if strings.HasPrefix(t.Request.URLPath, "/mockoon-admin") {
+			continue // d-mock's own readiness probes
+		}
 		c := Call{
 			Method: strings.ToUpper(t.Request.Method), Path: t.Request.URLPath, Route: t.Request.Route,
 			RouteID: ids[t.RouteUUID], Query: t.Request.Query, Body: t.Request.Body,
