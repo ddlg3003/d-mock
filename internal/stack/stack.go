@@ -277,6 +277,9 @@ func (r *Runner) upMock(ctx context.Context, st *State, name string, restart, dr
 	} else {
 		it.State = "started"
 	}
+	if err := rotateLog(r.logPath(name)); err != nil {
+		return it, err
+	}
 	if err := os.MkdirAll(filepath.Dir(envPath), 0o755); err != nil {
 		return it, err
 	}
@@ -384,6 +387,9 @@ func (r *Runner) upService(ctx context.Context, st *State, name string, restart,
 	} else {
 		it.State = "started"
 	}
+	if err := rotateLog(r.logPath(name)); err != nil {
+		return it, err
+	}
 	dir := r.Stack.Dir
 	if svc.Dir != "" {
 		dir = r.Stack.Path(svc.Dir)
@@ -452,6 +458,9 @@ func (r *Runner) upServiceContainer(ctx context.Context, st *State, name string,
 		it.State = "restarted"
 	} else {
 		it.State = "started"
+	}
+	if err := rotateLog(r.logPath(name)); err != nil {
+		return it, err
 	}
 	if c.Build != nil {
 		ctxDir := r.Stack.Path(c.Build.Context)

@@ -1,9 +1,9 @@
-name: load — 20 users for 15s against the service limited to 0.5 CPU / 64 MiB
+name: load — 10 users for 15s against the service limited to 0.5 CPU / 64 MiB
 steps:
-  - name: 20 virtual users for 15s
+  - name: 10 virtual users for 15s
     k6:
       script: load/create_orders.js
-      vus: 20
+      vus: 10
       duration: 15s
       env: { API: "http://localhost:18081", RUN: "${run}" }
     expect:

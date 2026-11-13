@@ -81,3 +81,42 @@ services:
 		t.Error("two templates for one service must be an error")
 	}
 }
+
+func TestDuplicatePorts(t *testing.T) {
+	cases := map[string]string{
+		"two mocks": `project: x
+mocks:
+  a: { spec: a.yaml, port: 14000 }
+  b: { spec: b.yaml, port: 14000 }
+`,
+		"mock vs container dep": `project: x
+deps:
+  db: { kind: mysql, mode: container, container: { image: m, ports: ["14000:3306"] } }
+mocks:
+  a: { spec: a.yaml, port: 14000 }
+`,
+		"dep vs container service (ip:host:container)": `project: x
+deps:
+  db: { kind: mysql, mode: container, container: { image: m, ports: ["13306:3306"] } }
+services:
+  app: { container: { image: i, ports: ["127.0.0.1:13306:8080"] } }
+`,
+	}
+	for name, y := range cases {
+		dir := t.TempDir()
+		writeFile(t, filepath.Join(dir, "dmock.yaml"), y)
+		if _, err := Load(filepath.Join(dir, "dmock.yaml"), nil); err == nil || !strings.Contains(err.Error(), "host port") {
+			t.Errorf("%s: want a host port error, got %v", name, err)
+		}
+	}
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "dmock.yaml"), `project: x
+deps:
+  db: { kind: mysql, mode: remote, container: { image: m, ports: ["14000:3306"] }, remote: { vars: {} } }
+mocks:
+  a: { spec: a.yaml, port: 14000 }
+`)
+	if _, err := Load(filepath.Join(dir, "dmock.yaml"), nil); err != nil {
+		t.Errorf("a remote dep publishes nothing, so no clash: %v", err)
+	}
+}

@@ -18,6 +18,37 @@ import (
 	"github.com/ddlg3003/d-mock/internal/config"
 )
 
+// maxLogBytes is when a log in .dmock/logs is rotated: when its mock or service next starts
+// (after the old process stopped, so nothing is still writing to it), a bigger log is
+// moved to <name>.log.1 (replacing the previous one), so a log never holds more than this
+// plus one run's output, and the run before stays readable.
+const maxLogBytes = 20 << 20
+
+func rotateLog(path string) error {
+	fi, err := os.Stat(path)
+	if err != nil || fi.Size() < maxLogBytes {
+		return nil
+	}
+	return os.Rename(path, path+".1")
+}
+
+var secretFlagRe = regexp.MustCompile(`(?i)(token|password|passwd|secret)`)
+
+// maskArgs hides the value of secret-looking flags (--admin-api-token X, --password=X) in
+// the command line written to the log.
+func maskArgs(cmd []string) string {
+	out := make([]string, len(cmd))
+	for i, a := range cmd {
+		out[i] = a
+		if k, _, ok := strings.Cut(a, "="); ok && strings.HasPrefix(k, "-") && secretFlagRe.MatchString(k) {
+			out[i] = k + "=***"
+		} else if i > 0 && strings.HasPrefix(cmd[i-1], "-") && !strings.Contains(cmd[i-1], "=") && secretFlagRe.MatchString(cmd[i-1]) {
+			out[i] = "***"
+		}
+	}
+	return strings.Join(out, " ")
+}
+
 // startProcess runs cmd detached in its own process group, output appended to logPath.
 func startProcess(dir string, cmd []string, env []string, logPath string) (int, error) {
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
@@ -25,7 +56,7 @@ func startProcess(dir string, cmd []string, env []string, logPath string) (int, 
 		return 0, err
 	}
 	defer f.Close()
-	fmt.Fprintf(f, "\n=== d-mock start %s: %s\n", time.Now().Format(time.RFC3339), strings.Join(cmd, " "))
+	fmt.Fprintf(f, "\n=== d-mock start %s: %s\n", time.Now().Format(time.RFC3339), maskArgs(cmd))
 	c := exec.Command(cmd[0], cmd[1:]...)
 	c.Dir = dir
 	c.Env = append(os.Environ(), env...)
@@ -197,7 +228,7 @@ func runLogged(dir string, cmd []string, logPath string) error {
 		return err
 	}
 	defer f.Close()
-	fmt.Fprintf(f, "\n=== d-mock pre-build: %s\n", strings.Join(cmd, " "))
+	fmt.Fprintf(f, "\n=== d-mock pre-build: %s\n", maskArgs(cmd))
 	c := exec.Command(cmd[0], cmd[1:]...)
 	c.Dir = dir
 	var out bytes.Buffer

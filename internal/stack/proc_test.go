@@ -3,6 +3,7 @@ package stack
 import (
 	"net"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/ddlg3003/d-mock/internal/config"
@@ -74,5 +75,36 @@ func TestStateBelongsToProject(t *testing.T) {
 	st.Save(dir)
 	if _, err := b.State(); err != nil {
 		t.Fatalf("empty state of another project should be free to take over: %v", err)
+	}
+}
+
+func TestMaskArgs(t *testing.T) {
+	got := maskArgs([]string{"mockoon-cli", "start", "-d", "env.json", "--admin-api-token", "abc123", "--db-password=hunter2", "-X"})
+	want := "mockoon-cli start -d env.json --admin-api-token *** --db-password=*** -X"
+	if got != want {
+		t.Errorf("maskArgs = %q, want %q", got, want)
+	}
+}
+
+func TestRotateLog(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "svc.log")
+	os.WriteFile(p, []byte("small"), 0o644)
+	if err := rotateLog(p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(p + ".1"); err == nil {
+		t.Fatal("a small log must not rotate")
+	}
+	big := make([]byte, maxLogBytes)
+	os.WriteFile(p, big, 0o644)
+	os.WriteFile(p+".1", []byte("older run"), 0o644)
+	if err := rotateLog(p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Error("the big log should have moved")
+	}
+	if fi, _ := os.Stat(p + ".1"); fi == nil || fi.Size() != maxLogBytes {
+		t.Error(".1 should now hold the big log (one old file kept)")
 	}
 }

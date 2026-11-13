@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/ddlg3003/d-mock/internal/config"
 	"github.com/ddlg3003/d-mock/internal/stack"
 	"github.com/ddlg3003/d-mock/internal/tmpl"
 )
@@ -107,7 +108,9 @@ func (r *Runner) Run(ctx context.Context, sc *Scenario) (*Report, error) {
 		vars[k] = x
 	}
 	// log assertions only see lines written after the scenario started
-	for name := range r.Stack.Stack.Services {
+	names := config.SortedKeys(r.Stack.Stack.Services)
+	names = append(names, config.SortedKeys(r.Stack.Stack.Mocks)...)
+	for _, name := range names {
 		if p, ok := r.Stack.LogFile(name); ok {
 			if fi, err := os.Stat(p); err == nil {
 				ru.logOffs[name] = fi.Size()
@@ -192,6 +195,11 @@ func (ru *run) runStep(ctx context.Context, step Step, i int) (res StepResult) {
 			if ru.r.Opt.DryRun {
 				res.Passed = true
 				res.Result = map[string]any{"args": args}
+				// nothing ran, so nothing was saved: later steps see a placeholder that names
+				// the value, instead of failing on an unresolved ${saved.x}
+				for name := range step.Save {
+					ru.saved[name] = "<saved." + name + ">"
+				}
 				return res
 			}
 			out, err = ru.exec(ctx, typ, args.(map[string]any))

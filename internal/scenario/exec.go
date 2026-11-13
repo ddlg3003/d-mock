@@ -529,10 +529,16 @@ func keyOr(v any) string {
 
 // ---- log -----------------------------------------------------------------
 
-// log: {service, grep: regex}: lines the service logged since the scenario started.
+// log: {service or mock, grep: regex}: lines it logged since the scenario started.
 // result: {count, lines}
 func (ru *run) execLog(a map[string]any) (map[string]any, error) {
 	svc := str(a, "service")
+	if m := str(a, "mock"); m != "" {
+		if svc != "" {
+			return nil, errors.New("log: set service or mock, not both")
+		}
+		svc = m
+	}
 	path, ok := ru.r.Stack.LogFile(svc)
 	if !ok {
 		return nil, fmt.Errorf("no service or mock named %q", svc)

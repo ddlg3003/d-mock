@@ -229,6 +229,10 @@ services:
     ready: { http: "http://localhost:18080/healthz" }
 ```
 
+**Ports.** `lint` and `up` refuse a suite where two things would listen on the same host port: two mocks, or a mock and a container's published port.
+
+**Logs** live in `.dmock/logs/<name>.log`. When a mock or service starts and its log is over 20 MiB, the log moves to `<name>.log.1` (replacing the older one), so logs stay bounded and the previous run stays readable. Secret-looking flags (`--admin-api-token`, `--password=…`) are written as `***` in the start line.
+
 Inside a container, `localhost` is the container itself. Use `${host}` to reach the machine (mocks, container deps' published ports, other local services): it is `host.docker.internal` on docker and `host.containers.internal` on podman. Container logs are copied into `.dmock/logs/<service>.log`, so `logs` and `log` steps work the same for both kinds. `status` shows `OOM-KILLED exit=137` when a container hit its memory limit.
 
 **References.** Service `config` templates, `env` and `cmd` can use `${...}` references:
@@ -321,7 +325,7 @@ When a step fails, the remaining steps are skipped and cleanup still runs. `${la
 | `kafka` | `dep, topic, key, value` or `json`, `headers` | `topic, sent` |
 | `temporal` | `dep, action: start\|signal\|describe\|history\|terminate`, `workflow_id, type, task_queue, signal, input` | `status` (RUNNING, COMPLETED…), `events` (TimerCanceled…), `json` |
 | `mock` | `name` plus one of `set: {key, state}`, `fault: {key, fault, times}`, `clear: key`, `reset: true`, `calls: {route, key}` | `count, calls[].{method,path,status,body,json,response}` |
-| `log` | `service, grep` (only lines logged since the scenario started) | `count, lines` |
+| `log` | `service` or `mock`, `grep` (a regex; only lines logged since the scenario started) | `count, lines` |
 | `service` | `name` | `state` (running, exited, stopped), `oom_killed`, `exit_code`, `cpu_percent`, `mem_bytes`, `mem_limit_bytes`, `mem_percent` |
 | `k6` | `script, vus, duration, iterations, env, args, timeout` | `exit` (99 = a k6 threshold failed), `metrics.<name>.<stat>` (`p95`, `p99`, `avg`, `max`, `rate`, `count`), `checks.<name>.passes/fails`, `services.<name>.state/oom_killed` (container services after the load) |
 | `sleep` | `"2s"` | |
@@ -356,7 +360,7 @@ expect:
 - **Temporal workflows** started by `temporal start` are terminated after the run if they're still running.
 - **Mock state and faults** a scenario set are reset to their defaults after the run.
 - **`--keep`** skips this automatic cleanup so you can inspect the state. Explicit `cleanup:` steps still run.
-- **`--dry-run`** expands and prints each step without running it.
+- **`--dry-run`** expands and prints each step without running it. A value a step would `save` shows up in later steps as `<saved.name>`.
 
 ## Why d-mock has its own scenario runner (and not Venom)
 

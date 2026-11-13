@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -228,6 +229,9 @@ func (s *Stack) Validate() error {
 			}
 		}
 	}
+	if err := s.checkPorts(); err != nil {
+		return err
+	}
 	if s.Mockoon.Runner != "cli" && s.Mockoon.Runner != "docker" {
 		return fmt.Errorf("mockoon.runner must be cli or docker")
 	}
@@ -281,4 +285,50 @@ func SortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// checkPorts fails when two things in the suite would listen on the same host port: mocks,
+// and the published ports of container deps and container services ("host:container" or
+// "ip:host:container"). Otherwise the second one dies at `up` with "port already in use".
+func (s *Stack) checkPorts() error {
+	owner := map[string]string{}
+	claim := func(port, who string) error {
+		if prev, ok := owner[port]; ok {
+			return fmt.Errorf("host port %s is used by both %s and %s", port, prev, who)
+		}
+		owner[port] = who
+		return nil
+	}
+	published := func(specs []string, who string) error {
+		for _, p := range specs {
+			parts := strings.Split(p, ":")
+			if len(parts) < 2 {
+				continue // container-only port: nothing published on the host
+			}
+			if err := claim(parts[len(parts)-2], who); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, n := range SortedKeys(s.Mocks) {
+		if err := claim(fmt.Sprint(s.Mocks[n].Port), "mock "+n); err != nil {
+			return err
+		}
+	}
+	for _, n := range SortedKeys(s.Deps) {
+		if d := s.Deps[n]; d.Mode == "container" && d.Container != nil {
+			if err := published(d.Container.Ports, "dep "+n); err != nil {
+				return err
+			}
+		}
+	}
+	for _, n := range SortedKeys(s.Services) {
+		if c := s.Services[n].Container; c != nil {
+			if err := published(c.Ports, "service "+n); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
