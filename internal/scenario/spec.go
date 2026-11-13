@@ -31,6 +31,8 @@ type Step struct {
 	Temporal map[string]any `yaml:"temporal"`
 	Mock     map[string]any `yaml:"mock"`
 	Log      map[string]any `yaml:"log"`
+	Service  map[string]any `yaml:"service"`
+	K6       map[string]any `yaml:"k6"`
 	Sleep    string         `yaml:"sleep"`
 
 	// Expect maps a path in the step result to a matcher (see match.go).
@@ -63,12 +65,14 @@ func (s Step) Type() (string, map[string]any, error) {
 	set("temporal", s.Temporal)
 	set("mock", s.Mock)
 	set("log", s.Log)
+	set("service", s.Service)
+	set("k6", s.K6)
 	if s.Sleep != "" {
 		found = append(found, "sleep")
 		args = map[string]any{"duration": s.Sleep}
 	}
 	if len(found) != 1 {
-		return "", nil, fmt.Errorf("step %q must have exactly one action (http, exec, sql, kafka, temporal, mock, log, sleep), has %v", s.Name, found)
+		return "", nil, fmt.Errorf("step %q must have exactly one action (http, exec, sql, kafka, temporal, mock, log, service, k6, sleep), has %v", s.Name, found)
 	}
 	return found[0], args, nil
 }

@@ -1,6 +1,9 @@
 package tmpl
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestExpand(t *testing.T) {
 	data := map[string]any{
@@ -33,5 +36,18 @@ func TestExpandAnyKeepsType(t *testing.T) {
 	m := v.(map[string]any)
 	if m["n"] != 3 || m["s"] != "n=3" {
 		t.Fatalf("got %#v", m)
+	}
+}
+
+func TestStringifyNumbers(t *testing.T) {
+	cases := map[any]string{
+		float64(250317000000433):            "250317000000433",
+		float64(1.5):                        "1.5",
+		json.Number("12345678901234567890"): "12345678901234567890",
+	}
+	for in, want := range cases {
+		if got := Stringify(in); got != want {
+			t.Errorf("Stringify(%v) = %q, want %q", in, got, want)
+		}
 	}
 }

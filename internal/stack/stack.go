@@ -31,6 +31,10 @@ type Item struct {
 	URL     string `json:"url,omitempty"`
 	Log     string `json:"log,omitempty"`
 	Message string `json:"message,omitempty"`
+	// container services only
+	Container string `json:"container,omitempty"`
+	OOMKilled bool   `json:"oom_killed,omitempty"`
+	ExitCode  *int   `json:"exit_code,omitempty"`
 }
 
 type Runner struct {
@@ -52,7 +56,8 @@ func (r *Runner) Data(st *State) (map[string]any, error) {
 			env[k] = v
 		}
 	}
-	data := map[string]any{"env": env, "stack": map[string]any{"dir": r.Stack.Dir, "project": r.Stack.Project}}
+	// host: how a container service reaches this machine (mocks, container deps' published ports)
+	data := map[string]any{"env": env, "host": HostAlias(), "stack": map[string]any{"dir": r.Stack.Dir, "project": r.Stack.Project}}
 	deps := map[string]any{}
 	for name, d := range r.Stack.Deps {
 		v, err := tmpl.ExpandAny(toAny(d.Vars()), map[string]any{"env": env})
@@ -256,7 +261,7 @@ func (r *Runner) upMock(ctx context.Context, st *State, name string, restart, dr
 	hash := hex.EncodeToString(sum[:8])
 	envPath := filepath.Join(r.Dir, "mocks", name+".json")
 	prev := st.Mocks[name]
-	running := prev != nil && (alive(prev.PID) || (prev.Container != "" && containerRunning(prev.Container)))
+	running := prev != nil && (ours(prev.PID, prev.PIDStart) || (prev.Container != "" && containerRunning(prev.Container)))
 	if running && !restart && prev.EnvHash == hash {
 		it.State = "already-running"
 		it.PID = prev.PID
@@ -289,7 +294,7 @@ func (r *Runner) upMock(ctx context.Context, st *State, name string, restart, dr
 		if err != nil {
 			return it, err
 		}
-		ms.PID = pid
+		ms.PID, ms.PIDStart = pid, procStart(pid)
 	case "docker":
 		cname, err := runContainer(r.Stack.Project, name, "mockoon/cli:"+r.Stack.Mockoon.Version,
 			[]string{fmt.Sprintf("%d:%d", m.Port, m.Port)}, nil,
@@ -302,14 +307,15 @@ func (r *Runner) upMock(ctx context.Context, st *State, name string, restart, dr
 	}
 	st.Mocks[name] = ms
 	it.PID = ms.PID
-	ready := &config.Ready{HTTP: fmt.Sprintf("http://localhost:%d/mockoon-admin", m.Port), Timeout: config.Duration(60 * time.Second)}
 	isDead := func() bool {
 		if ms.PID > 0 {
 			return !alive(ms.PID)
 		}
 		return !containerRunning(ms.Container)
 	}
-	if err := waitReady(ctx, ready, ms.Log, isDead); err != nil {
+	// ready = our Mockoon answers its admin API with our token (a stray server on the port
+	// would answer 404 or 401, so it can never look ready)
+	if err := waitMockReady(ctx, mock.NewAdmin(name, m.Port, ms.Token), ms.Log, isDead); err != nil {
 		it.State = "error"
 		it.Message = err.Error()
 		return it, fmt.Errorf("mock %s: %w", name, err)
@@ -321,9 +327,9 @@ func (r *Runner) upService(ctx context.Context, st *State, name string, restart,
 	svc := r.Stack.Services[name]
 	it := Item{Kind: "service", Name: name, Log: r.logPath(name)}
 	prev := st.Services[name]
-	if prev != nil && alive(prev.PID) && !restart {
+	if prev.running() && !restart {
 		it.State = "already-running"
-		it.PID = prev.PID
+		it.PID, it.Container = prev.PID, prev.Container
 		return it, nil
 	}
 	data, err := r.Data(st)
@@ -358,6 +364,9 @@ func (r *Runner) upService(ctx context.Context, st *State, name string, restart,
 		}
 		env = append(env, k+"="+v)
 	}
+	if svc.Container != nil {
+		return r.upServiceContainer(ctx, st, name, svc, prev, ss, env, data, it, dry)
+	}
 	cmd := make([]string, len(svc.Cmd))
 	for i, a := range svc.Cmd {
 		if cmd[i], err = tmpl.Expand(a, data); err != nil {
@@ -369,8 +378,8 @@ func (r *Runner) upService(ctx context.Context, st *State, name string, restart,
 		it.Message = strings.Join(cmd, " ")
 		return it, nil
 	}
-	if prev != nil && alive(prev.PID) {
-		stopProcess(prev.PID, 10*time.Second)
+	if prev.running() {
+		r.stopService(prev)
 		it.State = "restarted"
 	} else {
 		it.State = "started"
@@ -385,7 +394,7 @@ func (r *Runner) upService(ctx context.Context, st *State, name string, restart,
 		it.Message = err.Error()
 		return it, fmt.Errorf("service %s: %w", name, err)
 	}
-	ss.PID = pid
+	ss.PID, ss.PIDStart = pid, procStart(pid)
 	st.Services[name] = ss
 	it.PID = pid
 	if err := waitReady(ctx, svc.Ready, ss.Log, func() bool { return !alive(pid) }); err != nil {
@@ -396,9 +405,172 @@ func (r *Runner) upService(ctx context.Context, st *State, name string, restart,
 	return it, nil
 }
 
+func (r *Runner) upServiceContainer(ctx context.Context, st *State, name string, svc *config.Service, prev, ss *ServiceState, env []string, data map[string]any, it Item, dry bool) (Item, error) {
+	var err error
+	c := svc.Container
+	opts := containerOpts{CPUs: c.CPUs, Memory: c.Memory, Ports: c.Ports, Env: map[string]string{}}
+	for _, kv := range env { // service-level env applies to the container too
+		k, v, _ := strings.Cut(kv, "=")
+		opts.Env[k] = v
+	}
+	for _, k := range config.SortedKeys(c.Env) {
+		v, err := tmpl.Expand(c.Env[k], data)
+		if err != nil {
+			return it, fmt.Errorf("service %s container.env %s: %w", name, k, err)
+		}
+		opts.Env[k] = v
+	}
+	for _, m := range c.Mounts {
+		v, err := tmpl.Expand(m, data)
+		if err != nil {
+			return it, fmt.Errorf("service %s mount: %w", name, err)
+		}
+		// relative host paths resolve against stack.yaml
+		if host, rest, ok := strings.Cut(v, ":"); ok && !filepath.IsAbs(host) {
+			v = r.Stack.Path(host) + ":" + rest
+		}
+		opts.Mounts = append(opts.Mounts, v)
+	}
+	for _, a := range c.Args {
+		v, err := tmpl.Expand(a, data)
+		if err != nil {
+			return it, fmt.Errorf("service %s container.args: %w", name, err)
+		}
+		opts.Args = append(opts.Args, v)
+	}
+	image := c.Image
+	if c.Build != nil {
+		image = containerName(r.Stack.Project, name) + ":dmock"
+	}
+	if dry {
+		it.State = "would-start"
+		it.Message = fmt.Sprintf("%s run %s cpus=%s memory=%s", ContainerCLI(), image, c.CPUs, c.Memory)
+		return it, nil
+	}
+	if prev.running() {
+		r.stopService(prev)
+		it.State = "restarted"
+	} else {
+		it.State = "started"
+	}
+	if c.Build != nil {
+		ctxDir := r.Stack.Path(c.Build.Context)
+		if len(c.Build.Pre) > 0 {
+			pre := make([]string, len(c.Build.Pre))
+			for i, a := range c.Build.Pre {
+				if pre[i], err = tmpl.Expand(a, data); err != nil {
+					return it, fmt.Errorf("service %s build.pre: %w", name, err)
+				}
+			}
+			if err := runLogged(ctxDir, pre, ss.Log); err != nil {
+				it.State, it.Message = "error", err.Error()
+				return it, fmt.Errorf("service %s build.pre: %w", name, err)
+			}
+		}
+		df := ""
+		if c.Build.Dockerfile != "" {
+			df = filepath.Join(ctxDir, c.Build.Dockerfile)
+		}
+		if err := buildImage(image, ctxDir, df, c.Build.Args, ss.Log); err != nil {
+			it.State, it.Message = "error", err.Error()
+			return it, fmt.Errorf("service %s: %w", name, err)
+		}
+	}
+	cname, err2 := runServiceContainer(r.Stack.Project, name, image, opts)
+	if err2 != nil {
+		it.State, it.Message = "error", err2.Error()
+		return it, fmt.Errorf("service %s: %w", name, err2)
+	}
+	ss.Container = cname
+	// follow the container log into the service log file, so `logs` and `log` steps work the same
+	if pid, err := startProcess(r.Dir, []string{ContainerCLI(), "logs", "-f", cname}, nil, ss.Log); err == nil {
+		ss.LogPID, ss.LogStart = pid, procStart(pid)
+	}
+	st.Services[name] = ss
+	it.Container = cname
+	if err := waitReady(ctx, svc.Ready, ss.Log, func() bool { return !inspectContainer(cname).Running }); err != nil {
+		info := inspectContainer(cname)
+		it.State, it.Message = "error", err.Error()
+		if info.OOMKilled {
+			it.Message = "OOM killed (memory limit " + c.Memory + ")\n" + it.Message
+		}
+		return it, fmt.Errorf("service %s: %s", name, it.Message)
+	}
+	return it, nil
+}
+
+func (s *ServiceState) running() bool {
+	if s == nil {
+		return false
+	}
+	if s.Container != "" {
+		return inspectContainer(s.Container).Running
+	}
+	return ours(s.PID, s.PIDStart)
+}
+
+func (r *Runner) stopService(s *ServiceState) {
+	if s.Container != "" {
+		_ = removeContainer(s.Container)
+		if s.LogPID > 0 {
+			stopProcess(s.LogPID, s.LogStart, 2*time.Second)
+		}
+		return
+	}
+	stopProcess(s.PID, s.PIDStart, 10*time.Second)
+}
+
+// ServiceStatus reports a service's state; for containers also OOM kill, exit code and a
+// resource sample (nil when not running).
+func (r *Runner) ServiceStatus(name string) (Item, *ContainerStats, error) {
+	if _, ok := r.Stack.Services[name]; !ok {
+		return Item{}, nil, fmt.Errorf("no service named %q", name)
+	}
+	st, err := LoadState(r.Stack.Dir)
+	if err != nil {
+		return Item{}, nil, err
+	}
+	it := r.serviceItem(name, st.Services[name])
+	if it.Container == "" || it.State != "running" {
+		return it, nil, nil
+	}
+	stats, err := statsContainer(it.Container)
+	if err != nil {
+		return it, nil, err
+	}
+	return it, &stats, nil
+}
+
+func (r *Runner) serviceItem(name string, ss *ServiceState) Item {
+	it := Item{Kind: "service", Name: name, State: "stopped", Log: r.logPath(name)}
+	if ss == nil {
+		return it
+	}
+	if ss.Container != "" {
+		info := inspectContainer(ss.Container)
+		it.Container = ss.Container
+		if !info.Exists {
+			return it
+		}
+		if info.Running {
+			it.State = "running"
+			return it
+		}
+		it.State = "exited"
+		it.OOMKilled = info.OOMKilled
+		code := info.ExitCode
+		it.ExitCode = &code
+		return it
+	}
+	if ours(ss.PID, ss.PIDStart) {
+		it.State, it.PID = "running", ss.PID
+	}
+	return it
+}
+
 func (r *Runner) stopMock(m *MockState) {
 	if m.PID > 0 {
-		stopProcess(m.PID, 5*time.Second)
+		stopProcess(m.PID, m.PIDStart, 5*time.Second)
 	}
 	if m.Container != "" {
 		_ = removeContainer(m.Container)
@@ -442,12 +614,12 @@ func (r *Runner) Down(only []string) ([]Item, error) {
 			continue
 		}
 		state := "stopped"
-		if alive(ss.PID) {
-			stopProcess(ss.PID, 10*time.Second)
+		if ss.running() || ss.Container != "" {
+			r.stopService(ss) // containers are removed even when already exited
 		} else {
 			state = "not-running"
 		}
-		items = append(items, Item{Kind: "service", Name: n, State: state, PID: ss.PID})
+		items = append(items, Item{Kind: "service", Name: n, State: state, PID: ss.PID, Container: ss.Container})
 		delete(st.Services, n)
 	}
 	for _, n := range config.SortedKeys(st.Mocks) {
@@ -500,17 +672,13 @@ func (r *Runner) Status() ([]Item, error) {
 	for _, n := range config.SortedKeys(r.Stack.Mocks) {
 		m := r.Stack.Mocks[n]
 		it := Item{Kind: "mock", Name: n, Port: m.Port, URL: fmt.Sprintf("http://localhost:%d", m.Port), State: "stopped", Log: r.logPath(n)}
-		if ms := st.Mocks[n]; ms != nil && (alive(ms.PID) || (ms.Container != "" && containerRunning(ms.Container))) {
+		if ms := st.Mocks[n]; ms != nil && (ours(ms.PID, ms.PIDStart) || (ms.Container != "" && containerRunning(ms.Container))) {
 			it.State, it.PID = "running", ms.PID
 		}
 		items = append(items, it)
 	}
 	for _, n := range config.SortedKeys(r.Stack.Services) {
-		it := Item{Kind: "service", Name: n, State: "stopped", Log: r.logPath(n)}
-		if ss := st.Services[n]; ss != nil && alive(ss.PID) {
-			it.State, it.PID = "running", ss.PID
-		}
-		items = append(items, it)
+		items = append(items, r.serviceItem(n, st.Services[n]))
 	}
 	return items, nil
 }
@@ -560,4 +728,24 @@ func sortedKeys(m map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func waitMockReady(ctx context.Context, a *mock.Admin, logPath string, isDead func() bool) error {
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		if isDead() {
+			return fmt.Errorf("mockoon exited before it was ready; last log lines:\n%s", tail(logPath, 15))
+		}
+		if a.Ping() == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("mockoon admin API not ready after 60s; last log lines:\n%s", tail(logPath, 15))
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(300 * time.Millisecond):
+		}
+	}
 }

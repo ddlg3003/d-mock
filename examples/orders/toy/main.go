@@ -62,8 +62,34 @@ func main() {
 	mux.HandleFunc("POST /orders", s.create)
 	mux.HandleFunc("GET /orders/{id}", s.get)
 	mux.HandleFunc("POST /callback", s.callback)
+	mux.HandleFunc("POST /debug/alloc", allocate)
 	log.Printf("orders listening on %s (partner %s)", cfg.Listen, cfg.PartnerURL)
 	log.Fatal(http.ListenAndServe(cfg.Listen, mux))
+}
+
+// ballast keeps memory allocated by /debug/alloc, to show what a memory limit does.
+var (
+	ballastMu sync.Mutex
+	ballast   [][]byte
+)
+
+// allocate grabs ?mb=N more megabytes and touches every page so it is really resident.
+func allocate(w http.ResponseWriter, r *http.Request) {
+	var mb int
+	fmt.Sscan(r.URL.Query().Get("mb"), &mb)
+	b := make([]byte, mb<<20)
+	for i := 0; i < len(b); i += 4096 {
+		b[i] = 1
+	}
+	ballastMu.Lock()
+	ballast = append(ballast, b)
+	total := 0
+	for _, x := range ballast {
+		total += len(x)
+	}
+	ballastMu.Unlock()
+	log.Printf("allocated %d MiB, holding %d MiB", mb, total>>20)
+	json.NewEncoder(w).Encode(map[string]int{"holding_mb": total >> 20})
 }
 
 func (s *server) create(w http.ResponseWriter, r *http.Request) {
@@ -76,6 +102,7 @@ func (s *server) create(w http.ResponseWriter, r *http.Request) {
 	}
 	o := Order{ID: in.ID, Status: "WAITING"}
 	if err := s.save(o); err != nil {
+		log.Printf("order=%s create failed: %v", o.ID, err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

@@ -55,6 +55,46 @@ func TestSQLGuards(t *testing.T) {
 	}
 }
 
+// TestSQLGuardBypasses: a comment or a literal can neither hide a statement's kind nor
+// carry the run id, and a non-SELECT is a write by default.
+func TestSQLGuardBypasses(t *testing.T) {
+	_, skel := splitSQL("/* x */ DROP TABLE t")
+	if !ddlRe.MatchString(skel) {
+		t.Error("DDL behind a comment not caught")
+	}
+	for _, q := range []string{
+		"WITH d AS (SELECT 1) DELETE FROM t",
+		"CALL purge()",
+		"SET @a = 1",
+		"LOAD DATA INFILE 'x' INTO TABLE t",
+	} {
+		if _, sk := splitSQL(q); isReadOnly(sk) {
+			t.Errorf("%q treated as read-only", q)
+		}
+	}
+	for _, q := range []string{
+		"SELECT * FROM t WHERE status = 'update'",
+		"SELECT id FROM t WHERE note = '#1' AND kind = 'x--y'",
+		"show tables",
+		"SELECT * FROM t FOR UPDATE", // a locking read, still a read
+	} {
+		if _, sk := splitSQL(q); !isReadOnly(sk) {
+			t.Errorf("%q not treated as read-only", q)
+		}
+	}
+	bare, _ := splitSQL("DELETE FROM t /* dm1 */ -- dm1\n")
+	if mentionsRun("dm1", bare, nil) {
+		t.Error("run id in a comment accepted")
+	}
+	bare, _ = splitSQL("DELETE FROM t WHERE id = 'x-dm1' -- note")
+	if !mentionsRun("dm1", bare, nil) {
+		t.Error("run id in a literal rejected")
+	}
+	if b, _ := splitSQL("SELECT '#keep' # gone"); b != "SELECT '#keep'" {
+		t.Errorf("comment strip = %q", b)
+	}
+}
+
 func TestEventName(t *testing.T) {
 	cases := map[string]string{
 		"EVENT_TYPE_TIMER_CANCELED":              "TimerCanceled",

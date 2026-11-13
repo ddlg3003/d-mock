@@ -67,13 +67,37 @@ type Mock struct {
 }
 
 // Service is one of our own codebases, run as a supervised subprocess.
+// Service is one of our own codebases: a local subprocess (cmd) or a container (container).
 type Service struct {
 	Dir       string            `yaml:"dir"`
 	Cmd       []string          `yaml:"cmd"`
+	Container *ServiceContainer `yaml:"container"`
 	Env       map[string]string `yaml:"env"`
 	Config    *ConfigFile       `yaml:"config"`
 	Ready     *Ready            `yaml:"ready"`
 	DependsOn []string          `yaml:"depends_on"`
+}
+
+// ServiceContainer runs a service in a container with k8s-like resource limits.
+type ServiceContainer struct {
+	Image  string            `yaml:"image"`
+	Build  *Build            `yaml:"build"`
+	CPUs   string            `yaml:"cpus"`   // e.g. "0.5"  ≈ k8s resources.limits.cpu
+	Memory string            `yaml:"memory"` // e.g. "512m" ≈ k8s resources.limits.memory
+	Ports  []string          `yaml:"ports"`
+	Env    map[string]string `yaml:"env"`
+	Mounts []string          `yaml:"mounts"` // host:container[:ro]; ${...} allowed
+	Args   []string          `yaml:"args"`
+}
+
+// Build builds the service image before it starts (on every `up` of that service).
+type Build struct {
+	// Pre runs in the context directory before the image build, e.g. a local `go build`
+	// so the Dockerfile only copies the binary.
+	Pre        []string          `yaml:"pre"`
+	Context    string            `yaml:"context"`
+	Dockerfile string            `yaml:"dockerfile"`
+	Args       map[string]string `yaml:"args"`
 }
 
 // ConfigFile is a template rendered with ${...} references before the service starts.
@@ -187,8 +211,13 @@ func (s *Stack) Validate() error {
 		if err := add("service", n); err != nil {
 			return err
 		}
-		if len(svc.Cmd) == 0 {
-			return fmt.Errorf("service %s: cmd is required", n)
+		switch {
+		case len(svc.Cmd) == 0 && svc.Container == nil:
+			return fmt.Errorf("service %s: set cmd or container", n)
+		case len(svc.Cmd) > 0 && svc.Container != nil:
+			return fmt.Errorf("service %s: set cmd or container, not both", n)
+		case svc.Container != nil && (svc.Container.Image == "") == (svc.Container.Build == nil):
+			return fmt.Errorf("service %s: container needs exactly one of image or build", n)
 		}
 		for _, d := range svc.DependsOn {
 			if _, ok := names[d]; !ok && s.Services[d] == nil {

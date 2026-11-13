@@ -34,6 +34,9 @@ Global flags (anywhere on the line):
       --json             machine-readable output
       --mode DEP=MODE    switch a dep to remote|container for this command (repeatable)
 
+Setup:
+  doctor [scenario...]                           check the tools dmock needs (and how to install them)
+
 Stack:
   up [--only a,b] [--restart a,b] [--dry-run]   start what is not running (idempotent)
   down [name...]                                 stop services, mocks, containers (remote deps untouched)
@@ -53,8 +56,9 @@ Help:
   help [TOPIC]                                   usage, or a topic (guide); "dmock guide" = "dmock help guide"
 
 Scenarios:
-  run FILE|DIR... [--dry-run] [--keep] [--run-id ID] [--verbose]
-      --keep    skip automatic cleanup (seeded rows, started workflows, mock state)
+  run FILE|DIR... [--dry-run] [--keep] [--run-id ID] [--verbose] [--allow-remote-load]
+      --keep               skip automatic cleanup (seeded rows, started workflows, mock state)
+      --allow-remote-load  let k6 steps run while some deps are remote (shared servers)
 `
 
 type cli struct {
@@ -66,7 +70,11 @@ type cli struct {
 	args  []string
 }
 
-var boolFlags = map[string]bool{"json": true, "dry-run": true, "keep": true, "verbose": true, "help": true, "h": true}
+var boolFlags = map[string]bool{"json": true, "dry-run": true, "keep": true, "verbose": true, "help": true, "h": true, "allow-remote-load": true}
+
+// valueFlags are the flags that take a value; anything else is an error, so a typo such as
+// --time 3 fails instead of being ignored.
+var valueFlags = map[string]bool{"f": true, "file": true, "mode": true, "only": true, "restart": true, "grep": true, "tail": true, "times": true, "route": true, "key": true, "run-id": true}
 
 func parse(argv []string) (*cli, error) {
 	c := &cli{modes: map[string]string{}, flags: map[string]string{}, bools: map[string]bool{}}
@@ -84,6 +92,9 @@ func parse(argv []string) (*cli, error) {
 		if boolFlags[name] {
 			c.bools[name] = true
 			continue
+		}
+		if !valueFlags[name] {
+			return c, fmt.Errorf("unknown flag %s (see dmock help)", a)
 		}
 		if !hasVal {
 			if i+1 >= len(argv) {
@@ -128,6 +139,9 @@ func run(argv []string) int {
 			return 2
 		}
 		return 0
+	}
+	if c.args[0] == "doctor" { // works with or without a stack.yaml
+		return c.doctor()
 	}
 	if c.args[0] == "help" || c.args[0] == "guide" { // needs no stack.yaml
 		topic := "guide"
@@ -226,6 +240,15 @@ func (c *cli) items(items []stack.Item) {
 		}
 		if it.URL != "" {
 			extra = append(extra, it.URL)
+		}
+		if it.Container != "" {
+			extra = append(extra, "container="+it.Container)
+		}
+		if it.OOMKilled {
+			extra = append(extra, "OOM-KILLED")
+		}
+		if it.ExitCode != nil {
+			extra = append(extra, fmt.Sprintf("exit=%d", *it.ExitCode))
 		}
 		fmt.Printf("%-8s %-20s %-16s %s\n", it.Kind, it.Name, it.State, strings.Join(extra, " "))
 		if it.Message != "" {
@@ -371,6 +394,9 @@ func (c *cli) mock(r *stack.Runner) int {
 		if len(fields) == 0 {
 			return c.fail(2, fmt.Errorf("mock set needs at least one field=value"))
 		}
+		if err := spec.CheckState(fields); err != nil {
+			return c.fail(2, fmt.Errorf("mock %s: %w", name, err))
+		}
 		err = admin.SetState(k, fields)
 		result = map[string]any{"mock": name, "key": k, "state": fields}
 	case "fault":
@@ -386,6 +412,9 @@ func (c *cli) mock(r *stack.Runner) int {
 			if times, err = strconv.Atoi(t); err != nil {
 				return c.fail(2, err)
 			}
+		}
+		if err := spec.CheckFault(c.args[4]); err != nil {
+			return c.fail(2, fmt.Errorf("mock %s: %w", name, err))
 		}
 		err = admin.SetFault(k, c.args[4], times)
 		result = map[string]any{"mock": name, "key": k, "fault": c.args[4], "times": times}
@@ -463,7 +492,7 @@ func (c *cli) runScenarios(ctx context.Context, r *stack.Runner) int {
 		}
 		scs = append(scs, sc)
 	}
-	opt := scenario.Options{DryRun: c.bools["dry-run"], KeepState: c.bools["keep"], RunID: c.flags["run-id"], Verbose: c.bools["verbose"]}
+	opt := scenario.Options{DryRun: c.bools["dry-run"], KeepState: c.bools["keep"], RunID: c.flags["run-id"], Verbose: c.bools["verbose"], AllowRemoteLoad: c.bools["allow-remote-load"]}
 	if !c.json {
 		opt.Progress = func(s scenario.StepResult) {
 			mark := "✓"
@@ -480,6 +509,9 @@ func (c *cli) runScenarios(ctx context.Context, r *stack.Runner) int {
 			}
 			for _, f := range s.Failures {
 				fmt.Printf("      expect: %s\n", f)
+			}
+			if w, ok := s.Result["warning"].(string); ok && w != "" {
+				fmt.Printf("      warning: %s\n", w)
 			}
 		}
 	}

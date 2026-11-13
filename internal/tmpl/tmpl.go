@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -109,6 +110,12 @@ func Stringify(v any) string {
 		return t
 	case nil:
 		return ""
+	case json.Number:
+		return t.String()
+	case float64: // never scientific notation: 250317000000433, not 2.50317000000433e+14
+		return strconv.FormatFloat(t, 'f', -1, 64)
+	case float32:
+		return strconv.FormatFloat(float64(t), 'f', -1, 32)
 	case map[string]any, []any:
 		b, _ := json.Marshal(t)
 		return string(b)

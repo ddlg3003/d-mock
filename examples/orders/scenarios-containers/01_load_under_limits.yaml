@@ -1,0 +1,16 @@
+name: load — 20 users for 15s against the service limited to 0.5 CPU / 64 MiB
+steps:
+  - name: 20 virtual users for 15s
+    k6:
+      script: load/create_orders.js
+      vus: 20
+      duration: 15s
+      env: { API: "http://localhost:18080", RUN: "${run}" }
+    expect:
+      exit: 0
+      metrics.http_req_failed.rate: { lt: 0.01 }        # under 1% failed requests
+      metrics.http_req_duration.p95: { lt: 500 }
+      services.orders.oom_killed: false
+  - name: survived the load inside its limits
+    service: { name: orders }
+    expect: { state: running, oom_killed: false, mem_percent: { lt: 90 } }

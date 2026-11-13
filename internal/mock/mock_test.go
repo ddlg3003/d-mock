@@ -168,3 +168,39 @@ func waitHTTP(t *testing.T, u string) {
 	}
 	t.Fatalf("%s never came up", u)
 }
+
+func TestFilterKeyIsWholeToken(t *testing.T) {
+	calls := []Call{
+		{Path: "/orders/o1", RouteID: "get"},
+		{Path: "/orders/o10", RouteID: "get"},
+		{Path: "/orders", Body: `{"id":"o1"}`, RouteID: "create"},
+		{Path: "/orders/xo1", RouteID: "get"},
+		{Path: "/orders/PCN-o1-2", RouteID: "get"},
+	}
+	got := Filter(calls, "", "o1")
+	if len(got) != 2 || got[0].Path != "/orders/o1" || got[1].RouteID != "create" {
+		t.Fatalf("Filter o1 = %+v", got)
+	}
+	if got := Filter(calls, "get", "PCN-o1-2"); len(got) != 1 {
+		t.Fatalf("Filter PCN-o1-2 = %+v", got)
+	}
+}
+
+func TestCheckStateAndFault(t *testing.T) {
+	s := &Spec{Routes: []Route{{ID: "a", State: map[string]string{"status": "WAITING"}, Faults: map[string]Fault{"timeout": {Latency: time.Second}}}}}
+	if err := s.CheckState(map[string]string{"status": "APPROVED"}); err != nil {
+		t.Error(err)
+	}
+	if err := s.CheckState(map[string]string{"stauts": "APPROVED"}); err == nil {
+		t.Error("typo state field accepted")
+	}
+	if err := s.CheckFault("timeout"); err != nil {
+		t.Error(err)
+	}
+	if err := s.CheckFault(""); err != nil {
+		t.Error("clearing must be allowed")
+	}
+	if err := s.CheckFault("timout"); err == nil {
+		t.Error("typo fault accepted")
+	}
+}

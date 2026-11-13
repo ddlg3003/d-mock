@@ -79,11 +79,14 @@ These came up in real use. Check them before you blame the code under test.
 3. **A log check finds nothing.** Services often log enums by name (`SIGN_CONTRACT`), not by number (`5`). Grep the log by hand first (`dmock logs svc --grep ID`), then copy the exact text into the pattern.
 4. **`unresolved reference ${env.X}`.** dmock never fills in defaults. Export the variable before `up` and `run`.
 5. **Two workers on the same Temporal task queue split the work.** Only one of them should be up (`dmock up --only worker-fast`).
-6. **`sql` refuses a write.** On a `remote` dep, every write must contain the run id. That's on purpose: a test may only touch rows it created. Seed with `sql.insert` (its rows are deleted automatically) or with an `exec` step that calls your seed tool.
+6. **A container service can't reach a mock or dep.** Inside a container, `localhost` is the container. Use `${host}` in its config template.
+7. **A load test is refused.** `k6` won't run while a dep is `remote`, to protect shared servers. Switch deps to containers (`--mode db=container`) or pass `--allow-remote-load` if you mean it.
+8. **`sql` refuses a write.** On a `remote` dep, every write must contain the run id. That's on purpose: a test may only touch rows it created. Seed with `sql.insert` (its rows are deleted automatically) or with an `exec` step that calls your seed tool.
 
 ## Rules dmock enforces (don't try to work around them)
 
 - No DDL (`CREATE/ALTER/DROP/TRUNCATE/...`) on any database.
-- Writes on remote databases must include the run id.
+- Writes on remote databases must include the run id (in the statement or args, not in a comment). Anything that isn't a plain read counts as a write, including `CALL` and `SET`. One statement per step.
+- `mock set` / `mock fault` (CLI and steps) reject a state field or fault the spec doesn't declare, and unknown CLI flags are an error, so typos fail loudly.
 - `down` never touches remote deps.
 - After every run, dmock deletes the rows it inserted, terminates the workflows it started and resets the mock state it set. Pass `--keep` only to inspect a failure, then clean up by hand.

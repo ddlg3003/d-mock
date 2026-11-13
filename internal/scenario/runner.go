@@ -41,7 +41,9 @@ type Options struct {
 	KeepState bool   // skip automatic cleanup (explicit cleanup steps still run)
 	RunID     string // reuse a run id instead of generating one
 	Verbose   bool   // keep full step results in the report
-	Progress  func(StepResult)
+	// AllowRemoteLoad lets k6 steps run while some deps are remote (shared servers).
+	AllowRemoteLoad bool
+	Progress        func(StepResult)
 }
 
 // Runner executes scenarios against a started stack.
@@ -132,9 +134,13 @@ func (r *Runner) Run(ctx context.Context, sc *Scenario) (*Report, error) {
 		}
 	}
 
-	// cleanup always runs: explicit steps first, then the ledger (unless --keep)
+	// cleanup always runs, even after Ctrl-C: it gets its own context so a cancelled run
+	// still deletes its rows and terminates its workflows. Explicit steps first, then the
+	// ledger (unless --keep).
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+	defer cancel()
 	for i, step := range sc.Cleanup {
-		res := ru.runStep(ctx, step, i)
+		res := ru.runStep(cctx, step, i)
 		res.Name = "cleanup: " + res.Name
 		rep.Cleanup = append(rep.Cleanup, res)
 		if r.Opt.Progress != nil {
@@ -142,7 +148,7 @@ func (r *Runner) Run(ctx context.Context, sc *Scenario) (*Report, error) {
 		}
 	}
 	if !r.Opt.KeepState && !r.Opt.DryRun {
-		for _, res := range ru.ledger.undo(ctx, ru) {
+		for _, res := range ru.ledger.undo(cctx, ru) {
 			rep.Cleanup = append(rep.Cleanup, res)
 			if r.Opt.Progress != nil {
 				r.Opt.Progress(res)
@@ -275,6 +281,10 @@ func (ru *run) exec(ctx context.Context, typ string, args map[string]any) (map[s
 		return ru.execMock(args)
 	case "log":
 		return ru.execLog(args)
+	case "service":
+		return ru.execService(args)
+	case "k6":
+		return ru.execK6(ctx, args)
 	case "sleep":
 		d, err := time.ParseDuration(tmpl.Stringify(args["duration"]))
 		if err != nil {

@@ -1,0 +1,34 @@
+# Same stack as stack.yaml, but the orders service runs as a container with k8s-like limits.
+#   dmock -f stack.containers.yaml up
+project: orders-containers
+
+deps:
+  redis:
+    kind: redis
+    mode: container
+    container:
+      image: redis:7.2.4
+      ports: ["16379:6379"]
+      vars: { addr: "localhost:16379" }
+    ready: { tcp: "localhost:16379", timeout: 30s }
+
+mocks:
+  partner:
+    spec: mocks/partner.yaml
+    port: 13001
+
+services:
+  orders:
+    config: { template: toy/config.container.tmpl.yaml }
+    container:
+      build:
+        pre: ["sh", "-c", "CGO_ENABLED=0 GOOS=linux go build -o examples/orders/toy/orders-linux ./examples/orders/toy"]
+        context: ../..
+        dockerfile: examples/orders/toy/Dockerfile
+      cpus: "0.5"          # ≈ resources.limits.cpu: 500m
+      memory: 64m          # ≈ resources.limits.memory: 64Mi
+      ports: ["18080:18080"]
+      env: { ORDERS_CONFIG: /config/orders.yaml }
+      mounts: ["${services.orders.config}:/config/orders.yaml:ro"]
+    ready: { http: "http://localhost:18080/healthz", timeout: 120s }
+    depends_on: [redis, partner]

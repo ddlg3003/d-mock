@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -92,4 +94,46 @@ func (s *Spec) Find(id string) (*Route, bool) {
 		}
 	}
 	return nil, false
+}
+
+// CheckState fails on a field no route reads: setting it would silently change nothing.
+func (s *Spec) CheckState(fields map[string]string) error {
+	known := map[string]bool{}
+	for _, r := range s.Routes {
+		for f := range r.State {
+			known[f] = true
+		}
+	}
+	for f := range fields {
+		if !known[f] {
+			return fmt.Errorf("no route reads state field %q (declared: %s)", f, strings.Join(sortedSet(known), ", "))
+		}
+	}
+	return nil
+}
+
+// CheckFault fails on a fault no route declares ("" clears and is always allowed).
+func (s *Spec) CheckFault(name string) error {
+	if name == "" {
+		return nil
+	}
+	known := map[string]bool{}
+	for _, r := range s.Routes {
+		for f := range r.Faults {
+			known[f] = true
+		}
+	}
+	if !known[name] {
+		return fmt.Errorf("no route declares fault %q (declared: %s)", name, strings.Join(sortedSet(known), ", "))
+	}
+	return nil
+}
+
+func sortedSet(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

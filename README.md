@@ -19,6 +19,7 @@ scenario.yaml ──dmock run──▶  sql · kafka ·     mock set · fault ·
 - **One file for the whole stack.** `stack.yaml` lists the dependencies, mocked APIs and services, with readiness checks and start order.
 - **Choose per dependency: real or local.** Each dependency either points at an existing server (`remote`) or runs in a container. Switch for one run with `--mode db=container`.
 - **Generated service configs.** Config files are templates (`${deps.db.dsn}`, `${mocks.payments.url}`, `${env.TOKEN}`). A missing value is an error, never a silent default.
+- **Services as processes or containers.** Run the code under test as a local process, or build and run it as a container with k8s-like limits (`cpus: "0.5"`, `memory: 256m`). Hitting the memory limit kills the container with exit 137 (OOM), the same as a pod.
 - **Safe to repeat.** `up` starts only what is down and restarts a mock when its spec changed. `down` never touches remote dependencies.
 
 **Mocks** (on [Mockoon](https://mockoon.com))
@@ -29,14 +30,16 @@ scenario.yaml ──dmock run──▶  sql · kafka ·     mock set · fault ·
 - **Raw and encoded bodies.** Values are never HTML-escaped. Pre-encrypted or signed fixtures are served byte for byte.
 
 **Scenarios**
-- **One YAML format for every kind of step.** `http`, `exec`, `sql`, `kafka`, `temporal`, `mock`, `log` and `sleep`, each with `expect`, `save` and `retry`.
+- **One YAML format for every kind of step.** `http`, `exec`, `sql`, `kafka`, `temporal`, `mock`, `log`, `service`, `k6` and `sleep`, each with `expect`, `save` and `retry`.
+- **Load tests with [k6](https://k6.io).** A `k6` step runs your script and turns its summary into checkable values: `metrics.http_req_duration.p95: { lt: 500 }`. Combine load with mock faults and resource limits to answer "does it survive a slow third party with 256 MiB?".
+- **Resource checks.** A `service` step reports a container's state, OOM kill, exit code, CPU % and memory use.
 - **Rich checks.** `eq`, `ne`, `contains`, `match`, `gt`/`gte`/`lt`/`lte`, `len` and `exists` on any path of a step's result, including list items (`calls.0.status`).
 - **Waiting for asynchronous results.** `retry: { timeout: 30s, every: 1s }` polls a step until its checks pass.
 - **Isolated runs.** Every run gets a unique `${run}` id to put in the data it creates, so runs never collide on shared servers.
 - **Automatic cleanup.** Inserted rows are deleted, started workflows are terminated, and mock state is reset, even when the test fails.
 
 **Safety and output**
-- **Guardrails on shared servers.** No DDL on any database, and every write on a remote database must include the run id.
+- **Guardrails on shared servers.** No DDL on any database, every write on a remote database must include the run id, and `k6` load refuses to run while any dep is remote unless you pass `--allow-remote-load`.
 - **Machine-readable.** Every command supports `--json`, and exit codes are fixed: `0` ok, `1` failed, `2` bad input.
 - **Readable failures.** Failed checks are reported in words, e.g. `json.status: got "WAITING", want "APPROVED"`.
 - **Built-in docs.** `dmock help guide` works without the repo.
@@ -44,10 +47,18 @@ scenario.yaml ──dmock run──▶  sql · kafka ·     mock set · fault ·
 ## Install
 
 ```bash
-go install github.com/ddlg3003/d-mock/cmd/dmock@latest   # or: make build  → bin/dmock
-npm i -g @mockoon/cli@9.10.0    # mock engine (or set mockoon.runner: docker)
-brew install temporal           # only needed for temporal steps
+go install github.com/ddlg3003/d-mock/cmd/dmock@latest
+dmock doctor        # checks the tools below and prints how to install what's missing
 ```
+
+| Tool | Needed for | Install |
+|---|---|---|
+| [Mockoon CLI](https://mockoon.com/cli/) 9.x | mocked HTTP APIs (any stack with `mocks:`) | `npm i -g @mockoon/cli@9.10.0` (Node.js 18+), or set `mockoon.runner: docker` |
+| Docker or Podman | `mode: container` deps, container services, `mockoon.runner: docker` | [Docker Desktop](https://docs.docker.com/get-docker/), or `brew install podman && podman machine init && podman machine start` |
+| [Temporal CLI](https://docs.temporal.io/cli) | `temporal` steps | `brew install temporal` |
+| [k6](https://grafana.com/docs/k6/latest/set-up/install-k6/) | `k6` load-test steps | `brew install k6` |
+
+Run `dmock doctor` inside a project folder and it marks what that `stack.yaml` actually needs. Run `dmock doctor scenarios/` and it also checks the tools your scenarios use (k6, temporal). It exits 1 when something needed is missing.
 
 The container engine is `docker`, or `podman` if docker isn't installed. Override it with `$DMOCK_CONTAINER_CLI`.
 
@@ -141,7 +152,21 @@ services:
     config: { template: toy/config.tmpl.yaml }  # rendered to .dmock/rendered/orders.yaml
     ready: { http: "http://localhost:18080/healthz", timeout: 90s }   # or tcp: / log: <regex>
     depends_on: [redis, partner]
+
+  # the same service as a container with resource limits (see examples/orders/stack.containers.yaml)
+  orders-in-container:
+    config: { template: toy/config.container.tmpl.yaml }
+    container:
+      image: my/orders:dev           # or build: { context, dockerfile, args, pre: [local build cmd] }
+      cpus: "0.5"                    # docker/podman --cpus   ≈ resources.limits.cpu: 500m
+      memory: 256m                   # --memory (no swap)     ≈ resources.limits.memory: 256Mi
+      ports: ["18080:18080"]
+      env: { ORDERS_CONFIG: /config/orders.yaml }
+      mounts: ["${services.orders-in-container.config}:/config/orders.yaml:ro"]
+    ready: { http: "http://localhost:18080/healthz" }
 ```
+
+Inside a container, `localhost` is the container itself. Use `${host}` to reach the machine (mocks, container deps' published ports, other local services): it is `host.docker.internal` on docker and `host.containers.internal` on podman. Container logs are copied into `.dmock/logs/<service>.log`, so `logs` and `log` steps work the same for both kinds. `status` shows `OOM-KILLED exit=137` when a container hit its memory limit.
 
 **References.** Service `config` templates, `env` and `cmd` can use `${...}` references:
 
@@ -234,6 +259,8 @@ When a step fails, the remaining steps are skipped and cleanup still runs. `${la
 | `temporal` | `dep, action: start\|signal\|describe\|history\|terminate`, `workflow_id, type, task_queue, signal, input` | `status` (RUNNING, COMPLETED…), `events` (TimerCanceled…), `json` |
 | `mock` | `name` plus one of `set: {key, state}`, `fault: {key, fault, times}`, `clear: key`, `reset: true`, `calls: {route, key}` | `count, calls[].{method,path,status,body,json,response}` |
 | `log` | `service, grep` (only lines logged since the scenario started) | `count, lines` |
+| `service` | `name` | `state` (running, exited, stopped), `oom_killed`, `exit_code`, `cpu_percent`, `mem_bytes`, `mem_limit_bytes`, `mem_percent` |
+| `k6` | `script, vus, duration, iterations, env, args, timeout` | `exit` (99 = a k6 threshold failed), `metrics.<name>.<stat>` (`p95`, `p99`, `avg`, `max`, `rate`, `count`), `checks.<name>.passes/fails`, `services.<name>.state/oom_killed` (container services after the load) |
 | `sleep` | `"2s"` | |
 
 **Dep vars each step needs:**
@@ -260,7 +287,8 @@ expect:
 ### Safety and cleanup
 
 - **No DDL.** `sql` refuses DDL (`CREATE/ALTER/DROP/TRUNCATE/RENAME/GRANT/REVOKE`) on every dep.
-- **Writes are scoped to the run.** On a `remote` dep, every write (`INSERT/UPDATE/DELETE/REPLACE`) must contain the run id in the statement or its args. A scenario can only touch rows it created itself.
+- **Writes are scoped to the run.** On a `remote` dep, every statement that isn't a plain read (`SELECT/SHOW/DESCRIBE/EXPLAIN`, or a `WITH` that only selects) counts as a write, including `CALL`, `SET` and `LOAD DATA`. A write must contain the run id in the statement or its args, not in a comment. A scenario can only touch rows it created itself.
+- **One statement per step.** Comments are stripped before these checks, so they can't hide a statement's kind.
 - **`sql.insert`** requires the key value to contain the run id, records the row, and deletes it after the run.
 - **Temporal workflows** started by `temporal start` are terminated after the run if they're still running.
 - **Mock state and faults** a scenario set are reset to their defaults after the run.
@@ -292,4 +320,6 @@ make e2e    # example stack up → 3 scenarios → down
 | `http`, `mock`, `log`, `sleep`, `exec` steps | Tested end to end |
 | `temporal` steps | Tested against `temporal server start-dev` and a remote TLS cluster |
 | `sql` and `kafka` steps | Used against a shared MySQL server and Kafka broker (reads, plus writes scoped to the run id) |
+| Container services (build, limits, host access, OOM detection) | Tested end to end with podman (`examples/orders/stack.containers.yaml`) |
+| `k6` step | Tested end to end (load against a 0.5 CPU / 64 MiB container; OOM shown in the failing step) |
 | `mockoon.runner: docker` | Not tested yet |

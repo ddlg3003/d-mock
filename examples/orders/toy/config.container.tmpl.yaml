@@ -1,0 +1,7 @@
+# Container variant: listen on all interfaces, reach redis and the mock through the host.
+listen: "0.0.0.0:18080"
+redis_addr: "${host}:16379"
+partner_url: "http://${host}:13001"
+poll_delay: 3s
+poll_every: 1s
+approval_timeout: 8s

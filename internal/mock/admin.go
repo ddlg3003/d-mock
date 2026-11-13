@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -51,6 +52,11 @@ func (a *Admin) do(method, path string, body any, out any) error {
 		return json.Unmarshal(data, out)
 	}
 	return nil
+}
+
+// Ping succeeds only when this Mockoon instance accepts our admin token.
+func (a *Admin) Ping() error {
+	return a.do(http.MethodGet, "", nil, nil)
 }
 
 func (a *Admin) SetVar(key, value string) error {
@@ -175,14 +181,19 @@ func (a *Admin) Calls(spec *Spec) ([]Call, error) {
 	return calls, nil
 }
 
-// Filter keeps calls to routeID (if set) whose path, query or body contains key (if set).
+// Filter keeps calls to routeID (if set) whose path, query or body contains key (if set) as
+// a whole token: key o1 matches /orders/o1 and {"id":"o1"} but not o10 or xo1.
 func Filter(calls []Call, routeID, key string) []Call {
+	var keyRe *regexp.Regexp
+	if key != "" {
+		keyRe = regexp.MustCompile(`(^|[^A-Za-z0-9_\-])` + regexp.QuoteMeta(key) + `($|[^A-Za-z0-9_\-])`)
+	}
 	var out []Call
 	for _, c := range calls {
 		if routeID != "" && c.RouteID != routeID {
 			continue
 		}
-		if key != "" && !strings.Contains(c.Path, key) && !strings.Contains(c.Query, key) && !strings.Contains(c.Body, key) {
+		if keyRe != nil && !keyRe.MatchString(c.Path) && !keyRe.MatchString(c.Query) && !keyRe.MatchString(c.Body) {
 			continue
 		}
 		out = append(out, c)

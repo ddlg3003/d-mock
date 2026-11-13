@@ -53,8 +53,11 @@ func parseJSON(s string) (any, bool) {
 	if s == "" || (s[0] != '{' && s[0] != '[') {
 		return nil, false
 	}
+	// UseNumber keeps big ids exact (a float64 would round 64-bit ids and print 2.5e+14)
+	dec := json.NewDecoder(strings.NewReader(s))
+	dec.UseNumber()
 	var v any
-	if json.Unmarshal([]byte(s), &v) != nil {
+	if dec.Decode(&v) != nil {
 		return nil, false
 	}
 	return v, true
@@ -182,10 +185,68 @@ func execCmd(ctx context.Context, a map[string]any, baseDir string) (map[string]
 // ---- sql -----------------------------------------------------------------
 
 var (
-	ddlRe   = regexp.MustCompile(`(?i)^\s*(create|alter|drop|truncate|rename|grant|revoke)\b`)
-	writeRe = regexp.MustCompile(`(?i)^\s*(insert|update|delete|replace)\b`)
-	queryRe = regexp.MustCompile(`(?i)^\s*(select|show|describe|desc|explain|with)\b`)
+	ddlRe      = regexp.MustCompile(`(?i)^\s*(create|alter|drop|truncate|rename|grant|revoke)\b`)
+	writeRe    = regexp.MustCompile(`(?i)^\s*(insert|update|delete|replace)\b`)
+	queryRe    = regexp.MustCompile(`(?i)^\s*(select|show|describe|desc|explain|with)\b`)
+	writeKwRe  = regexp.MustCompile(`(?i)\b(insert|update|delete|replace|create|alter|drop|truncate|rename|grant|revoke|call|load|set|lock)\b`)
+	selForUpRe = regexp.MustCompile(`(?i)\bfor\s+update\b`)
 )
+
+// splitSQL removes /* */, -- and # comments (outside quotes), so a comment can neither hide
+// a statement's real kind nor carry the run id past the write guard. It returns the
+// statement without comments, and a skeleton where every quoted literal is also emptied,
+// so a value such as 'update' or '#1' is never read as a keyword or a comment.
+func splitSQL(q string) (bare, skeleton string) {
+	var b, k strings.Builder
+	for i := 0; i < len(q); i++ {
+		c := q[i]
+		switch {
+		case c == '\'' || c == '"' || c == '`':
+			j := i + 1
+			for j < len(q) && q[j] != c {
+				if q[j] == '\\' {
+					j++
+				}
+				j++
+			}
+			if j >= len(q) {
+				j = len(q) - 1
+			}
+			b.WriteString(q[i : j+1])
+			k.WriteByte(c)
+			k.WriteByte(c)
+			i = j
+		case c == '/' && i+1 < len(q) && q[i+1] == '*':
+			end := strings.Index(q[i+2:], "*/")
+			if end < 0 {
+				i = len(q)
+			} else {
+				i += end + 3
+			}
+			b.WriteByte(' ')
+			k.WriteByte(' ')
+		case c == '#' || (c == '-' && i+1 < len(q) && q[i+1] == '-'):
+			for i < len(q) && q[i] != '\n' {
+				i++
+			}
+			b.WriteByte(' ')
+			k.WriteByte(' ')
+		default:
+			b.WriteByte(c)
+			k.WriteByte(c)
+		}
+	}
+	return strings.TrimSpace(b.String()), strings.TrimSpace(k.String())
+}
+
+// isReadOnly reports whether a statement only reads. Anything else counts as a write
+// (default deny), including CALL, SET, LOAD DATA and a WITH … DELETE.
+func isReadOnly(q string) bool {
+	if !queryRe.MatchString(q) {
+		return false
+	}
+	return !writeKwRe.MatchString(selForUpRe.ReplaceAllString(q, ""))
+}
 
 func (ru *run) dep(name, kind string) (map[string]any, *config.Dep, error) {
 	d, ok := ru.r.Stack.Stack.Deps[name]
@@ -227,13 +288,18 @@ func (ru *run) execSQL(ctx context.Context, a map[string]any) (map[string]any, e
 	if l, ok := a["args"].([]any); ok {
 		qargs = l
 	}
-	if ddlRe.MatchString(q) {
-		return nil, fmt.Errorf("sql: DDL is not allowed: %s", firstLine(q))
+	bare, skel := splitSQL(q)
+	if ddlRe.MatchString(skel) {
+		return nil, fmt.Errorf("sql: DDL is not allowed: %s", firstLine(bare))
 	}
-	if writeRe.MatchString(q) && d.Mode == "remote" && !mentionsRun(ru.id, q, qargs) {
-		return nil, fmt.Errorf("sql: a write on remote dep %s must reference the run id %s (in the statement or args)", str(a, "dep"), ru.id)
+	if strings.Contains(strings.TrimRight(skel, "; \t\n"), ";") {
+		return nil, fmt.Errorf("sql: one statement per step: %s", firstLine(bare))
 	}
-	if queryRe.MatchString(q) {
+	readOnly := isReadOnly(skel)
+	if !readOnly && d.Mode == "remote" && !mentionsRun(ru.id, bare, qargs) {
+		return nil, fmt.Errorf("sql: a write on remote dep %s must reference the run id %s (in the statement or args, not in a comment)", str(a, "dep"), ru.id)
+	}
+	if readOnly {
 		rows, err := db.QueryContext(ctx, q, qargs...)
 		if err != nil {
 			return nil, err
@@ -405,6 +471,9 @@ func (ru *run) execMock(a map[string]any) (map[string]any, error) {
 				fields[k] = tmpl.Stringify(v)
 			}
 		}
+		if err := spec.CheckState(fields); err != nil {
+			return nil, fmt.Errorf("mock %s: %w", name, err)
+		}
 		if err := admin.SetState(key, fields); err != nil {
 			return nil, err
 		}
@@ -416,6 +485,9 @@ func (ru *run) execMock(a map[string]any) (map[string]any, error) {
 		times := 0
 		if t, ok := f["times"]; ok {
 			fmt.Sscan(tmpl.Stringify(t), &times)
+		}
+		if err := spec.CheckFault(str(f, "fault")); err != nil {
+			return nil, fmt.Errorf("mock %s: %w", name, err)
 		}
 		if err := admin.SetFault(key, str(f, "fault"), times); err != nil {
 			return nil, err

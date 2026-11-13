@@ -30,14 +30,19 @@ type MockState struct {
 	Env       string `json:"env"`
 	EnvHash   string `json:"env_hash"`
 	PID       int    `json:"pid,omitempty"`
+	PIDStart  string `json:"pid_start,omitempty"` // process start time, guards against PID reuse
 	Container string `json:"container,omitempty"`
 	Log       string `json:"log"`
 }
 
 type ServiceState struct {
-	PID    int    `json:"pid"`
-	Log    string `json:"log"`
-	Config string `json:"config,omitempty"`
+	PID       int    `json:"pid,omitempty"`
+	PIDStart  string `json:"pid_start,omitempty"` // process start time, guards against PID reuse
+	Container string `json:"container,omitempty"`
+	LogPID    int    `json:"log_pid,omitempty"` // `<cli> logs -f` follower writing the container log to Log
+	LogStart  string `json:"log_start,omitempty"`
+	Log       string `json:"log"`
+	Config    string `json:"config,omitempty"`
 }
 
 func statePath(dir string) string { return filepath.Join(dir, ".dmock", "state.json") }

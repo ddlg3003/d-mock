@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -46,9 +47,33 @@ func alive(pid int) bool {
 	return err == nil || err == syscall.EPERM
 }
 
-// stopProcess sends SIGTERM to the process group, then SIGKILL after grace.
-func stopProcess(pid int, grace time.Duration) {
+// procStart is the process start time as ps prints it ("" when unknown or gone).
+func procStart(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	out, err := exec.Command("ps", "-o", "lstart=", "-p", fmt.Sprint(pid)).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// ours reports whether pid is still the process d-mock started: alive and with the start
+// time recorded then. After a reboot or a long time the PID can belong to something else,
+// and signalling its process group would hit an unrelated program. An empty start (state
+// written by an older d-mock) falls back to the bare liveness check.
+func ours(pid int, start string) bool {
 	if !alive(pid) {
+		return false
+	}
+	return start == "" || procStart(pid) == start
+}
+
+// stopProcess sends SIGTERM to the process group, then SIGKILL after grace. It does nothing
+// when pid is no longer the process that was started at start.
+func stopProcess(pid int, start string, grace time.Duration) {
+	if !ours(pid, start) {
 		return
 	}
 	_ = syscall.Kill(-pid, syscall.SIGTERM)
@@ -78,12 +103,21 @@ func waitReady(ctx context.Context, r *config.Ready, logPath string, isDead func
 		}
 	}
 	client := &http.Client{Timeout: 2 * time.Second}
-	for {
-		if probe(client, r, logRe, logPath) {
-			return nil
-		}
+	dead := func() error {
 		if isDead != nil && isDead() {
 			return fmt.Errorf("process exited before it was ready; last log lines:\n%s", tail(logPath, 15))
+		}
+		return nil
+	}
+	for {
+		if err := dead(); err != nil {
+			return err
+		}
+		if probe(client, r, logRe, logPath) {
+			// a stale process on the same port also answers the probe: make sure ours is
+			// still alive a moment later (a port clash makes the new one exit at once)
+			time.Sleep(700 * time.Millisecond)
+			return dead()
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("not ready after %s (%s); last log lines:\n%s", timeout, describeProbe(r), tail(logPath, 15))
@@ -99,12 +133,7 @@ func waitReady(ctx context.Context, r *config.Ready, logPath string, isDead func
 func probe(client *http.Client, r *config.Ready, logRe *regexp.Regexp, logPath string) bool {
 	switch {
 	case r.TCP != "":
-		c, err := net.DialTimeout("tcp", r.TCP, time.Second)
-		if err != nil {
-			return false
-		}
-		c.Close()
-		return true
+		return tcpReady(r.TCP)
 	case r.HTTP != "":
 		resp, err := client.Get(r.HTTP)
 		if err != nil {
@@ -159,4 +188,44 @@ func tail(path string, n int) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// runLogged runs cmd to completion, appending its output to logPath.
+func runLogged(dir string, cmd []string, logPath string) error {
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "\n=== d-mock pre-build: %s\n", strings.Join(cmd, " "))
+	c := exec.Command(cmd[0], cmd[1:]...)
+	c.Dir = dir
+	var out bytes.Buffer
+	c.Stdout, c.Stderr = &out, &out
+	runErr := c.Run()
+	f.Write(out.Bytes())
+	if runErr != nil {
+		return fmt.Errorf("%s: %w\n%s", strings.Join(cmd, " "), runErr, strings.TrimSpace(out.String()))
+	}
+	return nil
+}
+
+// tcpReady connects and then reads briefly. Container port forwarders (podman's gvproxy,
+// docker-proxy) accept the connection before the app listens and then close it, so a bare
+// connect is not enough: an immediate EOF means "not listening yet"; a server greeting or a
+// read timeout (the server waits for the client) means ready.
+func tcpReady(addr string) bool {
+	c, err := net.DialTimeout("tcp", addr, time.Second)
+	if err != nil {
+		return false
+	}
+	defer c.Close()
+	_ = c.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	buf := make([]byte, 1)
+	_, err = c.Read(buf)
+	if err == nil {
+		return true // the server spoke first (MySQL, SMTP, …)
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
