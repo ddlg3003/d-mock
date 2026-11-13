@@ -1,4 +1,4 @@
-.PHONY: build test e2e e2e-checkout
+.PHONY: build test e2e e2e-checkout e2e-containers e2e-all
 
 build:
 	go build -o bin/dmock ./cmd/dmock
@@ -6,12 +6,16 @@ build:
 test:
 	go test ./...
 
-# e2e brings the example stack up, runs its scenarios and always takes it down again.
+# Each target runs one example suite with `dmock test`: up, every scenario, always down.
 e2e: build
-	cd examples/orders && ../../bin/dmock up && \
-	  (../../bin/dmock run scenarios; rc=$$?; ../../bin/dmock down; exit $$rc)
+	bin/dmock test examples/orders
 
-# e2e-checkout runs use case 1 of examples/checkout (MySQL in a container, the fake provider, the toy service).
 e2e-checkout: build
-	cd examples/checkout && ../../bin/dmock up && \
-	  (../../bin/dmock run scenarios; rc=$$?; ../../bin/dmock down; exit $$rc)
+	bin/dmock test examples/checkout
+
+# containers + load (needs docker/podman and k6)
+e2e-containers: build
+	bin/dmock test examples/orders/containers
+	bin/dmock test examples/checkout/pod-limits
+
+e2e-all: e2e e2e-checkout e2e-containers

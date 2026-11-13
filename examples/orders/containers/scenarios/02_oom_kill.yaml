@@ -1,10 +1,10 @@
 name: memory limit — the service is OOM killed past 64 MiB, like a k8s pod
 steps:
   - name: within the limit
-    http: { method: POST, url: "http://localhost:18080/debug/alloc?mb=16" }
+    http: { method: POST, url: "http://localhost:18081/debug/alloc?mb=16" }
     expect: { status: 200 }
   - name: past the limit (the request dies with the process, so ignore its outcome)
-    exec: { cmd: "curl -s -m 10 -X POST 'http://localhost:18080/debug/alloc?mb=96' || true" }
+    exec: { cmd: "curl -s -m 10 -X POST 'http://localhost:18081/debug/alloc?mb=96' || true" }
   - name: OOM killed, exit 137
     service: { name: orders }
     retry: { timeout: 15s, every: 1s }

@@ -1,4 +1,4 @@
-// Package config loads stack.yaml.
+// Package config loads a suite file (dmock.yaml, or stack.yaml).
 package config
 
 import (
@@ -62,7 +62,7 @@ func (d *Dep) Vars() map[string]any {
 
 // Mock is one partner API served by Mockoon from a d-mock mock spec.
 type Mock struct {
-	Spec string `yaml:"spec"`
+	Spec string `yaml:"spec"` // default: mocks/<name>.yaml
 	Port int    `yaml:"port"`
 }
 
@@ -154,6 +154,9 @@ func Load(path string, overrides map[string]string) (*Stack, error) {
 		return nil, err
 	}
 	s.Dir = filepath.Dir(abs)
+	if err := s.applyConventions(); err != nil {
+		return nil, err
+	}
 	for name, mode := range overrides {
 		d, ok := s.Deps[name]
 		if !ok {
@@ -203,8 +206,8 @@ func (s *Stack) Validate() error {
 		if err := add("mock", n); err != nil {
 			return err
 		}
-		if m.Spec == "" || m.Port == 0 {
-			return fmt.Errorf("mock %s: spec and port are required", n)
+		if m == nil || m.Port == 0 {
+			return fmt.Errorf("mock %s: port is required", n)
 		}
 	}
 	for n, svc := range s.Services {

@@ -1,11 +1,11 @@
 # d-mock
 
-**Run integration tests against a real stack on your own machine, from one YAML file and one CLI.**
+**Run integration tests against a real stack on your own machine or in CI, from one suite folder and one CLI.**
 
 d-mock starts what your services need: databases, brokers, mocked external APIs, and the services themselves. It then runs YAML test scenarios against that stack and cleans up after each run. It's built for the tests that are hard to write as unit tests: callbacks racing polls, retries, timeouts, third-party outages, and workflows that span several services.
 
 ```
-stack.yaml    ──dmock up──▶   deps              mocks                services
+dmock.yaml    ──dmock up──▶   deps              mocks                services
                               (remote or        (HTTP APIs via       (the code under
                                container)        Mockoon)             test, as processes)
                                   ▲                  ▲                    ▲
@@ -16,7 +16,9 @@ scenario.yaml ──dmock run──▶  sql · kafka ·     mock set · fault ·
 ## Features
 
 **Stack**
-- **One file for the whole stack.** `stack.yaml` lists the dependencies, mocked APIs and services, with readiness checks and start order.
+- **A suite is a folder, like a Helm chart.** Any folder with a `dmock.yaml` is a suite: the stack in `dmock.yaml`, mocks in `mocks/`, config templates in `configs/`, scenarios in `scenarios/`. Put it anywhere, in any repo; `dmock init` writes a starter one.
+- **The path picks what runs.** `dmock run it/` runs the whole suite, `dmock run it/scenarios/payments/` one folder, `dmock run it/scenarios/payments/01_timeout.yaml` one file. d-mock walks up from the path to the nearest `dmock.yaml`, the way git finds `.git`.
+- **Built for CI.** `dmock test it/ --junit report.xml` brings the stack up, runs every scenario, always takes it down, and writes a JUnit report that GitLab, GitHub and Jenkins display.
 - **Choose per dependency: real or local.** Each dependency either points at an existing server (`remote`) or runs in a container. Switch for one run with `--mode db=container`.
 - **Generated service configs.** Config files are templates (`${deps.db.dsn}`, `${mocks.payments.url}`, `${env.TOKEN}`). A missing value is an error, never a silent default.
 - **Services as processes or containers.** Run the code under test as a local process, or build and run it as a container with k8s-like limits (`cpus: "0.5"`, `memory: 256m`). Hitting the memory limit kills the container with exit 137 (OOM), the same as a pod.
@@ -67,21 +69,26 @@ dmock doctor        # checks the tools below and prints how to install what's mi
 | [Temporal CLI](https://docs.temporal.io/cli) | `temporal` steps | `brew install temporal` |
 | [k6](https://grafana.com/docs/k6/latest/set-up/install-k6/) | `k6` load-test steps | `brew install k6` |
 
-Run `dmock doctor` inside a project folder and it marks what that `stack.yaml` actually needs. Run `dmock doctor scenarios/` and it also checks the tools your scenarios use (k6, temporal). It exits 1 when something needed is missing.
+Run `dmock doctor` inside a suite and it marks what that suite's `dmock.yaml` actually needs. Run `dmock doctor test/it/scenarios` and it also checks the tools your scenarios use (k6, temporal). It exits 1 when something needed is missing.
 
 The container engine is `docker`, or `podman` if docker isn't installed. Override it with `$DMOCK_CONTAINER_CLI`.
 
 ## Quick start
 
-The example is a small `orders` service that waits for a decision from an external API. The decision arrives one of three ways: a callback, polling the API, or a cancel on timeout.
+```bash
+dmock init test/it       # a starter suite (needs only mockoon-cli), any folder name
+dmock test test/it       # up → every scenario → down; exit 0 when all pass
+```
+
+Or run an example. `orders` is a small service that waits for a decision from an external API, which arrives by callback, by polling, or not at all (then it cancels):
 
 ```bash
-make e2e
-# or step by step:
-cd examples/orders
-dmock up                 # redis container + API mock + orders service
-dmock run scenarios      # 3 scenarios
-dmock down
+dmock test examples/orders          # or: make e2e
+# or step by step, keeping the stack up between runs:
+dmock -f examples/orders up         # redis container + API mock + orders service
+dmock run examples/orders           # all 3 scenarios
+dmock run examples/orders/scenarios/02_poll_path_with_faults.yaml   # just one
+dmock -f examples/orders down
 ```
 
 ```
@@ -95,16 +102,63 @@ dmock down
 PASS poll path — API fails twice, then approves run=dm582f22 5.1s
 ```
 
+## Suites
+
+A suite is a folder with a `dmock.yaml` in it. The folder can have any name and live anywhere; one repo can hold several.
+
+```
+test/it/                         ← any name
+├── dmock.yaml                   ← makes the folder a suite: project, deps, mocks, services
+├── mocks/<name>.yaml            ← mock specs: mocks.<name> needs only a port
+├── configs/<service>.tmpl.yaml  ← service config templates, picked up by name
+├── scenarios/                   ← every *.yaml under it, recursively, in path order
+│   ├── 01_happy_path.yaml
+│   └── payments/
+│       ├── 01_timeout.yaml
+│       └── 02_declined.yaml
+├── load/                        ← k6 scripts (paths in steps resolve from the suite folder)
+├── pod-limits/dmock.yaml        ← a nested suite: a variant with its own stack (e.g. in containers)
+└── .dmock/                      ← generated state, logs, rendered configs; gitignore it
+```
+
+**Which suite?** Every command finds its suite the same way: from `-f` (a suite folder, or any stack file), else from the paths you pass to `run`, `test`, `lint` and `doctor`, else from the current folder. Each walks up to the nearest `dmock.yaml`. Paths from two different suites in one command are refused.
+
+**Which scenarios?** `run` and `test` take any mix of:
+
+| Path | Runs |
+|---|---|
+| nothing, or the suite folder | every scenario in `scenarios/` |
+| a folder | every `*.yaml` under it, recursively, except nested suites and hidden folders |
+| a file | that scenario |
+
+**Conventions.** `mocks.<name>.spec` defaults to `mocks/<name>.yaml`. A service's `config.template` defaults to `configs/<service>.tmpl.<ext>` when exactly one such file exists. Anything written explicitly in `dmock.yaml` wins, so older stack files (`stack.yaml`, explicit paths) keep working.
+
+**Nested suites** hold a variant of the stack, for example the same service in a container with CPU/memory limits for load tests. A nested suite has its own `.dmock/`, so give it its own ports and it can run next to its parent. It can reuse the parent's files with relative paths (`spec: ../mocks/partner.yaml`).
+
+**In CI** (GitLab shown; the job needs `mockoon-cli`, plus docker/podman and k6 if the suite uses them):
+
+```yaml
+integration:
+  script:
+    - dmock test test/it --junit report.xml
+  artifacts:
+    when: always
+    reports: { junit: report.xml }
+```
+
 ## CLI
 
 ```
-dmock [-f stack.yaml] [--json] [--mode DEP=MODE] <command>
+dmock [-f SUITE] [--json] [--mode DEP=MODE] <command>
+
+init DIR                                       write a starter suite into DIR (never overwrites)
+test [SUITE|DIR|FILE...] [--junit FILE]        up → run → down (always): the CI entry point
+lint [SUITE|DIR|FILE...]                       check dmock.yaml, mock specs and scenarios (alias: validate)
 
 up [--only a,b] [--restart a,b] [--dry-run]   start what is not running (idempotent)
 down [name...]                                 stop services, mocks, containers (remote deps untouched)
 status                                         what is running
 logs NAME [--grep RE] [--tail N]               mock/service log file, or a dep's container log
-validate [scenario...]                         check stack.yaml, mock specs, scenarios
 
 mock set NAME KEY field=value...               per-key state ("-" = routes without a key)
 mock fault NAME KEY FAULT [--times N]          inject a fault (default: until cleared)
@@ -113,7 +167,7 @@ mock calls NAME [--route ID] [--key K]         recorded requests
 mock reset NAME                                drop all state, faults, recorded calls
 mock compile NAME                              print the generated Mockoon environment
 
-run FILE|DIR... [--dry-run] [--keep] [--run-id ID] [--verbose]
+run [SUITE|DIR|FILE...] [--junit FILE] [--dry-run] [--keep] [--run-id ID] [--verbose]
 ```
 
 **Exit codes:** `0` ok, `1` failed (a scenario failed or a component errored), `2` usage or config error.
@@ -127,7 +181,7 @@ run FILE|DIR... [--dry-run] [--keep] [--run-id ID] [--verbose]
 - a scenario template;
 - common mistakes that look like bugs but aren't.
 
-## stack.yaml
+## dmock.yaml
 
 ```yaml
 project: orders-example          # container names: dmock-<project>-<dep>
@@ -147,7 +201,7 @@ deps:
     ready: { tcp: "localhost:16379", timeout: 30s }
 
 mocks:
-  partner: { spec: mocks/partner.yaml, port: 13001 }
+  partner: { port: 13001 }       # spec defaults to mocks/partner.yaml
 
 mockoon:                         # optional
   runner: cli                    # cli (mockoon-cli on PATH) | docker (mockoon/cli image)
@@ -155,16 +209,16 @@ mockoon:                         # optional
 
 services:
   orders:
-    dir: toy                     # working directory (relative to stack.yaml)
+    dir: toy                     # working directory (relative to the suite folder)
     cmd: ["go", "run", "."]
     env: { ORDERS_CONFIG: "${services.orders.config}" }
-    config: { template: toy/config.tmpl.yaml }  # rendered to .dmock/rendered/orders.yaml
+    # config defaults to configs/orders.tmpl.yaml; rendered to .dmock/rendered/orders.yaml
     ready: { http: "http://localhost:18080/healthz", timeout: 90s }   # or tcp: / log: <regex>
     depends_on: [redis, partner]
 
-  # the same service as a container with resource limits (see examples/orders/stack.containers.yaml)
+  # the same service as a container with resource limits (see the nested suite examples/orders/containers)
   orders-in-container:
-    config: { template: toy/config.container.tmpl.yaml }
+    config: { template: configs/orders-container.tmpl.yaml }
     container:
       image: my/orders:dev           # or build: { context, dockerfile, args, pre: [local build cmd] }
       cpus: "0.5"                    # docker/podman --cpus   ≈ resources.limits.cpu: 500m
@@ -317,7 +371,8 @@ So d-mock has a small built-in runner: one binary and one JSON report format. If
 
 ```bash
 make test   # unit tests; the Mockoon live test runs when mockoon-cli is on PATH
-make e2e    # example stack up → 3 scenarios → down
+make e2e            # dmock test examples/orders
+make e2e-all        # every example suite, including containers and k6 load
 ```
 
 ## Status
@@ -329,6 +384,6 @@ make e2e    # example stack up → 3 scenarios → down
 | `http`, `mock`, `log`, `sleep`, `exec` steps | Tested end to end |
 | `temporal` steps | Tested against `temporal server start-dev` and a remote TLS cluster |
 | `sql` and `kafka` steps | Used against a shared MySQL server and Kafka broker (reads, plus writes scoped to the run id) |
-| Container services (build, limits, host access, OOM detection) | Tested end to end with podman (`examples/orders/stack.containers.yaml`) |
+| Container services (build, limits, host access, OOM detection) | Tested end to end with podman (`examples/orders/containers`) |
 | `k6` step | Tested end to end (load against a 0.5 CPU / 64 MiB container; OOM shown in the failing step) |
 | `mockoon.runner: docker` | Not tested yet |

@@ -30,15 +30,28 @@ runs in seconds and cleans up after itself.
 
 ## What's in this folder
 
-| File | What it is | In your repo |
-|---|---|---|
-| `stack.yaml` | what to start: MySQL, the fake provider, the service | you write once |
-| `config.tmpl.yaml` | the service's normal config, with addresses filled in by d-mock | your config file, with `${...}` where addresses go |
-| `mocks/payments.yaml` | the fake payment provider: routes, default answer, faults | one per third party |
-| `scenarios/*.yaml` | use case 1: one question per file | grows with every bug you don't want back |
-| `stack.load.yaml`, `config.container.tmpl.yaml`, `Dockerfile`, `mocks/payments-slow.yaml` | use case 2: the same pieces, with the service in a container | your Dockerfile already exists |
-| `load/checkout.js`, `scenarios-load/*.yaml` | use case 2: a k6 script and its checks | |
-| `service/` | the toy service | your service, not copied |
+This folder is a d-mock **suite** (it has a `dmock.yaml`), with a nested suite for use case 2:
+
+```
+examples/checkout/
+├── dmock.yaml                    what to start: MySQL, the fake provider, the service
+├── configs/checkout.tmpl.yaml    the service's normal config, with ${...} where addresses go
+├── mocks/payments.yaml           the fake payment provider: routes, default answer, faults
+├── scenarios/                    use case 1: one question per file
+│   ├── 01_provider_timeout.yaml
+│   ├── 02_provider_down.yaml
+│   └── 03_card_declined.yaml
+├── pod-limits/                   use case 2, a nested suite with its own stack and .dmock/
+│   ├── dmock.yaml                the same service, in a container with the pod's limits
+│   ├── configs/checkout.tmpl.yaml
+│   ├── mocks/payments.yaml       the provider at production speed (300 ms)
+│   ├── load/checkout.js          a plain k6 script
+│   └── scenarios/01_launch_day.yaml
+└── service/                      the toy service and its Dockerfile (in your repo: your service, not copied)
+```
+
+`dmock.yaml` doesn't list the mock spec or config template paths: `mocks/<name>.yaml` and
+`configs/<service>.tmpl.yaml` are picked up by name.
 
 Needs: Go, `mockoon-cli`, docker or podman, and k6 for use case 2. `dmock doctor` checks
 them all.
@@ -113,9 +126,15 @@ API, wait and look at the DB, check what the provider received, grep the log.
 ### Run it
 
 ```bash
+dmock test examples/checkout        # up, all 3 scenarios, down: what CI runs
+```
+
+Or keep the stack up while you work, and run one scenario at a time:
+
+```bash
 cd examples/checkout
-dmock up                 # MySQL in a container, the fake provider, the service; waits until ready
-dmock run scenarios/
+dmock up                            # MySQL in a container, the fake provider, the service; waits until ready
+dmock run scenarios/01_provider_timeout.yaml
 dmock down
 ```
 
@@ -181,23 +200,23 @@ This is a rough check, not a benchmark: your laptop isn't a production node. It 
 the big problems early: a memory leak, a goroutine pile-up, a pool that is too small, work
 lost in the background.
 
-### What changes from use case 1: [`stack.load.yaml`](stack.load.yaml)
+### What changes from use case 1: the nested suite [`pod-limits/`](pod-limits/dmock.yaml)
 
 ```yaml
 services:
   checkout:
-    config: { template: config.container.tmpl.yaml }
-    container:
+    container:                 # config: pod-limits/configs/checkout.tmpl.yaml
       build: { ... }           # your Dockerfile
       cpus: "0.5"              # = resources.limits.cpu: 500m
       memory: 128m             # = resources.limits.memory: 128Mi (no swap: over it = OOM kill)
       ports: ["18091:18090"]
 ```
 
-The provider mock gets `latency: 300ms` ([`mocks/payments-slow.yaml`](mocks/payments-slow.yaml)),
-and the DB is always a local container, because load never goes to a shared server.
+The provider mock gets `latency: 300ms` ([`pod-limits/mocks/payments.yaml`](pod-limits/mocks/payments.yaml)),
+and the DB is always a local container, because load never goes to a shared server. The
+nested suite has its own ports and `.dmock/`, so it can run while use case 1 is up.
 
-### The load: [`load/checkout.js`](load/checkout.js) (plain k6) and its checks
+### The load: [`pod-limits/load/checkout.js`](pod-limits/load/checkout.js) (plain k6) and its checks
 
 ```yaml
 name: launch day — 50 shoppers for 30s, inside 500m CPU / 128Mi, provider at 300 ms
@@ -231,17 +250,12 @@ database knows whether the background charge really happened for each of them.
 
 ### Run it
 
-`dmock down` the use case 1 stack first: both stack files share this folder's `.dmock/`,
-and d-mock refuses to mix them.
-
 ```bash
-dmock -f stack.load.yaml up
-dmock -f stack.load.yaml run scenarios-load/
-dmock -f stack.load.yaml down
+dmock test examples/checkout/pod-limits
 ```
 
 ```
-▶ launch day — 50 shoppers for 30s, inside 500m CPU / 128Mi, provider at 300 ms (scenarios-load/01_launch_day.yaml)
+▶ launch day — 50 shoppers for 30s, inside 500m CPU / 128Mi, provider at 300 ms (examples/checkout/pod-limits/scenarios/01_launch_day.yaml)
   ✓ 50 virtual users for 30s [k6] 31.071s
   ✓ the pod is still healthy, with memory headroom left [service] 143ms
   ✓ every accepted checkout got charged (none lost in the background) [sql] 28ms
@@ -260,7 +274,7 @@ The first version of `service/` failed this scenario about one run in three:
 ```
 
 k6 was happy: under 1% errors and a fine p95. But 9 customers got a `202` and were never
-charged. `dmock -f stack.load.yaml logs checkout` had no line at all for those orders, so
+charged. `dmock -f pod-limits logs checkout` had no line at all for those orders, so
 their background goroutines were stuck. Adding driver timeouts to the DSN turned the hang
 into an error:
 
@@ -277,13 +291,13 @@ up under load, in the background, where a load tool alone can't see it.
 **Running out of memory** looks like what Kubernetes does to a pod: the `k6` step reports
 `services.checkout.oom_killed: true` with a warning, and `status` shows `OOM-KILLED exit=137`.
 This toy is too lean to hit 128Mi. See
-[`examples/orders/scenarios-containers/02_oom_kill.yaml`](../orders/scenarios-containers/02_oom_kill.yaml)
+[`examples/orders/containers/scenarios/02_oom_kill.yaml`](../orders/containers/scenarios/02_oom_kill.yaml)
 for a real OOM kill, checked as a scenario.
 
 ### Things to try
 
 - **Load while the provider misbehaves.** This is when goroutines and connections pile up.
-  Raise `latency` in `payments-slow.yaml` to `1500ms`: does checkout stay within 128Mi and
+  Raise `latency` in `pod-limits/mocks/payments.yaml` to `1500ms`: does checkout stay within 128Mi and
   under the p95?
 - **Find the limit.** Raise `vus` until a check fails. That's your pod's rough ceiling at
   this CPU and memory, before any autoscaling.
@@ -298,11 +312,12 @@ program uses the CPU. Before you trust a failure, run it again, then dig in with
 
 ## Using this in your own repo
 
-1. Copy this folder's layout into your repo (for example `test/dmock/`).
-2. `stack.yaml`: point `services.<name>.cmd` (or `container.build`) at your service, and
-   list its real dependencies.
+1. `dmock init test/it` (any folder name) writes a starter suite with this layout.
+2. `dmock.yaml`: point `services.<name>.cmd` (or `container.build`) at your service, and
+   list its real dependencies. Put its config template in `configs/<name>.tmpl.yaml`.
 3. One mock spec per third party, keyed by whatever identifies an entity in its requests.
 4. One scenario per question. Start with the incident you never want to see again.
+5. In CI: `dmock test test/it --junit report.xml`.
 
 See the [main README](../../README.md) for every option, and `dmock help guide` for the
 mistakes that look like bugs.

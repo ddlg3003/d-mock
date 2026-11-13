@@ -12,7 +12,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -29,20 +28,25 @@ Usage: dmock [global flags] <command> [args]
 
 New here? Run: dmock help guide
 
+The suite is the nearest folder with a dmock.yaml, found from -f, else the paths given to
+run/test/lint/doctor, else the current folder (walking up, like git).
+
 Global flags (anywhere on the line):
-  -f, --file PATH        stack file (default ./stack.yaml, or $DMOCK_STACK)
+  -f, --file PATH        suite folder or stack file (or $DMOCK_STACK)
       --json             machine-readable output
       --mode DEP=MODE    switch a dep to remote|container for this command (repeatable)
 
-Setup:
-  doctor [scenario...]                           check the tools dmock needs (and how to install them)
+Suite:
+  init DIR                                       write a starter suite into DIR (never overwrites)
+  test [SUITE|DIR|FILE...] [--junit FILE]        up, run, always down: the CI entry point
+  lint [SUITE|DIR|FILE...]                       check dmock.yaml, mock specs and scenarios (alias: validate)
+  doctor [SUITE|DIR|FILE...]                     check the tools dmock needs (and how to install them)
 
 Stack:
   up [--only a,b] [--restart a,b] [--dry-run]   start what is not running (idempotent)
   down [name...]                                 stop services, mocks, containers (remote deps untouched)
   status                                         what is running
   logs NAME [--grep RE] [--tail N]               a mock's or service's log (deps: container logs)
-  validate [scenario...]                         check stack.yaml, mock specs and scenarios
 
 Mocks:
   mock set NAME KEY field=value...               set per-key state (KEY "-" = routes without key)
@@ -56,7 +60,8 @@ Help:
   help [TOPIC]                                   usage, or a topic (guide); "dmock guide" = "dmock help guide"
 
 Scenarios:
-  run FILE|DIR... [--dry-run] [--keep] [--run-id ID] [--verbose] [--allow-remote-load]
+  run [SUITE|DIR|FILE...] [--dry-run] [--keep] [--run-id ID] [--verbose] [--allow-remote-load] [--junit FILE]
+      (a suite runs its scenarios/; a folder runs every *.yaml under it; a file runs itself)
       --keep               skip automatic cleanup (seeded rows, started workflows, mock state)
       --allow-remote-load  let k6 steps run while some deps are remote (shared servers)
 `
@@ -74,7 +79,7 @@ var boolFlags = map[string]bool{"json": true, "dry-run": true, "keep": true, "ve
 
 // valueFlags are the flags that take a value; anything else is an error, so a typo such as
 // --time 3 fails instead of being ignored.
-var valueFlags = map[string]bool{"f": true, "file": true, "mode": true, "only": true, "restart": true, "grep": true, "tail": true, "times": true, "route": true, "key": true, "run-id": true}
+var valueFlags = map[string]bool{"f": true, "file": true, "mode": true, "only": true, "restart": true, "grep": true, "tail": true, "times": true, "route": true, "key": true, "run-id": true, "junit": true}
 
 func parse(argv []string) (*cli, error) {
 	c := &cli{modes: map[string]string{}, flags: map[string]string{}, bools: map[string]bool{}}
@@ -120,9 +125,6 @@ func parse(argv []string) (*cli, error) {
 	if c.file == "" {
 		c.file = os.Getenv("DMOCK_STACK")
 	}
-	if c.file == "" {
-		c.file = "stack.yaml"
-	}
 	return c, nil
 }
 
@@ -140,10 +142,13 @@ func run(argv []string) int {
 		}
 		return 0
 	}
-	if c.args[0] == "doctor" { // works with or without a stack.yaml
+	if c.args[0] == "doctor" { // works with or without a suite
 		return c.doctor()
 	}
-	if c.args[0] == "help" || c.args[0] == "guide" { // needs no stack.yaml
+	if c.args[0] == "init" {
+		return c.initSuite()
+	}
+	if c.args[0] == "help" || c.args[0] == "guide" { // needs no suite
 		topic := "guide"
 		if c.args[0] == "help" {
 			if len(c.args) < 2 {
@@ -163,7 +168,11 @@ func run(argv []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	st, err := config.Load(c.file, c.modes)
+	file, err := c.suiteFile()
+	if err != nil {
+		return c.fail(2, err)
+	}
+	st, err := config.Load(file, c.modes)
 	if err != nil {
 		return c.fail(2, err)
 	}
@@ -193,8 +202,10 @@ func run(argv []string) int {
 		return 0
 	case "logs":
 		return c.logs(r)
-	case "validate":
+	case "validate", "lint":
 		return c.validate(r)
+	case "test":
+		return c.test(ctx, r)
 	case "mock":
 		return c.mock(r)
 	case "run":
@@ -322,7 +333,16 @@ func (c *cli) validate(r *stack.Runner) int {
 			problems = append(problems, err.Error())
 		}
 	}
-	for _, f := range expandScenarioArgs(c.args[1:]) {
+	// lint the suite's scenarios too: the ones named, or all of scenarios/ when it exists
+	var files []string
+	_, noScenarios := os.Stat(filepath.Join(r.Stack.Dir, "scenarios"))
+	if len(c.args) > 1 || noScenarios == nil {
+		var err error
+		if files, err = c.discover(r.Stack, c.args[1:]); err != nil {
+			problems = append(problems, err.Error())
+		}
+	}
+	for _, f := range files {
 		if _, err := scenario.Load(f); err != nil {
 			problems = append(problems, err.Error())
 		}
@@ -462,27 +482,13 @@ func oneLine(s string) string {
 	return s
 }
 
-func expandScenarioArgs(args []string) []string {
-	var files []string
-	for _, a := range args {
-		fi, err := os.Stat(a)
-		if err == nil && fi.IsDir() {
-			matches, _ := filepath.Glob(filepath.Join(a, "*.yaml"))
-			more, _ := filepath.Glob(filepath.Join(a, "*.yml"))
-			matches = append(matches, more...)
-			sort.Strings(matches)
-			files = append(files, matches...)
-			continue
-		}
-		files = append(files, a)
-	}
-	return files
-}
-
 func (c *cli) runScenarios(ctx context.Context, r *stack.Runner) int {
-	files := expandScenarioArgs(c.args[1:])
+	files, err := c.discover(r.Stack, c.args[1:])
+	if err != nil {
+		return c.fail(2, err)
+	}
 	if len(files) == 0 {
-		return c.fail(2, fmt.Errorf("usage: dmock run FILE|DIR... [--dry-run] [--keep] [--run-id ID]"))
+		return c.fail(2, fmt.Errorf("no scenarios found (usage: dmock run [SUITE|DIR|FILE...])"))
 	}
 	var scs []*scenario.Scenario
 	for _, f := range files {
@@ -538,6 +544,11 @@ func (c *cli) runScenarios(ctx context.Context, r *stack.Runner) int {
 			fmt.Printf("%s %s run=%s %s\n\n", verdict, sc.Name, rep.RunID, rep.Duration)
 		}
 	}
+	if p := c.flags["junit"]; p != "" {
+		if err := writeJUnit(p, r.Stack.Project, reports); err != nil {
+			return c.fail(2, fmt.Errorf("--junit: %w", err))
+		}
+	}
 	if c.json {
 		c.out(map[string]any{"ok": failed == 0, "passed": len(reports) - failed, "failed": failed, "reports": reports})
 	} else {
@@ -547,4 +558,29 @@ func (c *cli) runScenarios(ctx context.Context, r *stack.Runner) int {
 		return 1
 	}
 	return 0
+}
+
+// test is the CI entry point: up, run the suite's scenarios (or the paths given), and
+// always take the stack down again, even after a failure or Ctrl-C.
+func (c *cli) test(ctx context.Context, r *stack.Runner) int {
+	items, err := r.Up(ctx, stack.UpOptions{})
+	if !c.json {
+		c.items(items)
+		fmt.Println()
+	}
+	code := 0
+	if err != nil {
+		code = c.fail(1, err)
+	} else {
+		code = c.runScenarios(ctx, r)
+	}
+	down, derr := r.Down(nil)
+	if !c.json {
+		fmt.Println()
+		c.items(down)
+	}
+	if derr != nil && code == 0 {
+		return c.fail(1, derr)
+	}
+	return code
 }

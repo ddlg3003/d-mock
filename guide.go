@@ -1,7 +1,7 @@
 // Package dmock holds documentation embedded into the dmock binary.
 package dmock
 
-import _ "embed"
+import "embed"
 
 // Guide is docs/guide.md, printed by `dmock help guide`.
 //
@@ -12,3 +12,9 @@ var Guide string
 var HelpTopics = map[string]string{
 	"guide": Guide,
 }
+
+// InitTemplate is the starter suite `dmock init` writes. gitignore is written as .gitignore
+// (a dotfile would be skipped by go:embed).
+//
+//go:embed templates/init
+var InitTemplate embed.FS

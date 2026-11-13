@@ -5,7 +5,7 @@ steps:
       script: load/create_orders.js
       vus: 20
       duration: 15s
-      env: { API: "http://localhost:18080", RUN: "${run}" }
+      env: { API: "http://localhost:18081", RUN: "${run}" }
     expect:
       exit: 0
       metrics.http_req_failed.rate: { lt: 0.01 }        # under 1% failed requests

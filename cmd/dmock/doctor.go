@@ -56,13 +56,18 @@ func firstLine(s string) string {
 // needs; scenario files/dirs given as args mark k6/temporal when their steps use them.
 func (c *cli) doctor() int {
 	var st *config.Stack
-	if _, err := os.Stat(c.file); err == nil {
-		if s, err := config.Load(c.file, c.modes); err == nil {
+	var scenarioFiles []string
+	file, _ := c.suiteFile()
+	if file != "" {
+		if s, err := config.Load(file, c.modes); err == nil {
 			st = s
+			if len(c.args) > 1 {
+				scenarioFiles, _ = c.discover(s, c.args[1:])
+			}
 		}
 	}
 	usesStep := func(step string) bool {
-		for _, f := range expandScenarioArgs(c.args[1:]) {
+		for _, f := range scenarioFiles {
 			if b, err := os.ReadFile(f); err == nil && strings.Contains(string(b), step+":") {
 				return true
 			}
@@ -166,10 +171,10 @@ func (c *cli) doctor() int {
 		}
 	}
 	if c.json {
-		c.out(map[string]any{"ok": problems == 0, "stack": stackName(st, c.file), "checks": checks})
+		c.out(map[string]any{"ok": problems == 0, "stack": stackName(st, file), "checks": checks})
 	} else {
 		if st != nil {
-			fmt.Printf("stack: %s (%s)\n\n", st.Project, c.file)
+			fmt.Printf("stack: %s (%s)\n\n", st.Project, file)
 		} else {
 			fmt.Println("no stack.yaml here: showing everything dmock can use")
 			fmt.Println()

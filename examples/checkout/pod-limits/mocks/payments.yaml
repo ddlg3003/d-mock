@@ -1,4 +1,4 @@
-# payments.yaml, but every charge takes 300 ms, like the real provider under load.
+# The parent suite's payments.yaml, but every charge takes 300 ms, like the real provider under load.
 routes:
   - id: charge
     method: POST

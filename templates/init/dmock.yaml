@@ -1,0 +1,35 @@
+# A d-mock suite. This folder can have any name and live anywhere in your repo; the
+# dmock.yaml file is what makes it a suite. Relative paths resolve from this folder.
+#
+#   dmock test .            up, run every scenario in scenarios/, down (the CI one-liner)
+#   dmock run scenarios/x   run some scenarios against a stack you started with `dmock up`
+#   dmock lint .            check this file, the mocks and the scenarios without starting anything
+project: __NAME__
+
+# deps: infrastructure your service needs. Each one is either an existing server (remote)
+# or a container d-mock starts. Switch for one run with: dmock --mode db=container up
+# deps:
+#   db:
+#     kind: mysql
+#     mode: container
+#     container:
+#       image: mysql:8.0.36
+#       ports: ["13306:3306"]
+#       env: { MYSQL_ROOT_PASSWORD: root, MYSQL_DATABASE: app }
+#       vars: { dsn: "root:root@tcp(localhost:13306)/app" }
+#     remote:
+#       vars: { dsn: "${env.DEV_DB_DSN}" }     # secrets come from your shell, not this file
+#     ready: { tcp: "localhost:13306", timeout: 120s }
+
+# mocks: the third-party APIs your service calls. The spec is mocks/<name>.yaml.
+mocks:
+  partner: { port: 14000 }
+
+# services: the code under test. Its config template is configs/<name>.tmpl.yaml.
+# services:
+#   app:
+#     dir: ../..                               # your repo root, relative to this folder
+#     cmd: ["go", "run", "./cmd/app"]
+#     env: { APP_CONFIG: "${services.app.config}" }
+#     ready: { http: "http://localhost:8080/healthz", timeout: 90s }
+#     depends_on: [partner]

@@ -1,0 +1,32 @@
+# Nested suite: the orders service as a container with k8s-like limits, under load and past
+# its memory limit. Its own ports, so it can run next to the parent suite.
+#   dmock test .             (from this folder; or: dmock test examples/orders/containers)
+project: orders-containers
+
+deps:
+  redis:
+    kind: redis
+    mode: container
+    container:
+      image: redis:7.2.4
+      ports: ["16380:6379"]
+      vars: { addr: "localhost:16380" }
+    ready: { tcp: "localhost:16380", timeout: 30s }
+
+mocks:
+  partner: { spec: ../mocks/partner.yaml, port: 13002 }   # the parent suite's mock
+
+services:
+  orders:                      # config: configs/orders.tmpl.yaml
+    container:
+      build:
+        pre: ["sh", "-c", "CGO_ENABLED=0 GOOS=linux go build -o examples/orders/toy/orders-linux ./examples/orders/toy"]
+        context: ../../..
+        dockerfile: examples/orders/toy/Dockerfile
+      cpus: "0.5"          # ≈ resources.limits.cpu: 500m
+      memory: 64m          # ≈ resources.limits.memory: 64Mi
+      ports: ["18081:18080"]
+      env: { ORDERS_CONFIG: /config/orders.yaml }
+      mounts: ["${services.orders.config}:/config/orders.yaml:ro"]
+    ready: { http: "http://localhost:18081/healthz", timeout: 120s }
+    depends_on: [redis, partner]

@@ -1,0 +1,5 @@
+# Your service's normal config file, with ${...} where d-mock fills in addresses.
+# Used by services.app (configs/<service>.tmpl.<ext>); delete it if you have no services yet.
+listen: ":8080"
+partner_url: "${mocks.partner.url}"
+# db_dsn: "${deps.db.dsn}"
