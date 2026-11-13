@@ -1,6 +1,6 @@
 # d-mock guide
 
-How to use `dmock` day to day. Run `dmock help guide` to print this from the binary alone.
+How to use `dmock` day to day. Run `dmock help guide` to print this from the binary alone; `dmock help` lists the other topics.
 
 ## What dmock does, in one paragraph
 
@@ -88,7 +88,11 @@ steps:
     expect: { count: 1 }
 ```
 
-The [README](../README.md) lists every step type, its arguments and its result fields.
+More help, all built into the binary:
+
+- `dmock help suite`: the suite layout, every `dmock.yaml` field, and the mock spec format.
+- `dmock help steps`: every step type, its arguments, its result fields, and an example.
+- `dmock help examples`: patterns for the common questions (faults, retries, races, load inside pod limits).
 
 ## Mistakes that look like bugs but are not
 

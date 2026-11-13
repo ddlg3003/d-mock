@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 
@@ -57,7 +58,9 @@ Mocks:
   mock compile NAME                              print the generated Mockoon environment
 
 Help:
-  help [TOPIC]                                   usage, or a topic (guide); "dmock guide" = "dmock help guide"
+  version                                        the installed version
+  help [TOPIC]                                   usage, or a topic: guide (start here), suite (layout,
+                                                 dmock.yaml, mock specs), steps (every step), examples
 
 Scenarios:
   run [SUITE|DIR|FILE...] [--dry-run] [--keep] [--run-id ID] [--verbose] [--allow-remote-load] [--junit FILE]
@@ -148,19 +151,31 @@ func run(argv []string) int {
 	if c.args[0] == "init" {
 		return c.initSuite()
 	}
+	if c.args[0] == "version" {
+		v := "devel"
+		if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+			v = bi.Main.Version
+		}
+		if c.json {
+			c.out(map[string]any{"ok": true, "version": v})
+		} else {
+			fmt.Println("dmock", v)
+		}
+		return 0
+	}
 	if c.args[0] == "help" || c.args[0] == "guide" { // needs no suite
 		topic := "guide"
 		if c.args[0] == "help" {
 			if len(c.args) < 2 {
 				fmt.Print(usage)
-				fmt.Println("\nHelp topics: dmock help guide")
+				fmt.Println("\nHelp topics: dmock help " + strings.Join(dmock.HelpTopicList, " | "))
 				return 0
 			}
 			topic = c.args[1]
 		}
 		text, ok := dmock.HelpTopics[topic]
 		if !ok {
-			return c.fail(2, fmt.Errorf("unknown help topic %q (topics: guide)", topic))
+			return c.fail(2, fmt.Errorf("unknown help topic %q (topics: %s)", topic, strings.Join(dmock.HelpTopicList, ", ")))
 		}
 		fmt.Print(text)
 		return 0

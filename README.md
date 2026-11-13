@@ -172,14 +172,17 @@ run [SUITE|DIR|FILE...] [--junit FILE] [--dry-run] [--keep] [--run-id ID] [--ver
 
 **Exit codes:** `0` ok, `1` failed (a scenario failed or a component errored), `2` usage or config error.
 
-### Guide
+### Built-in help
 
-`dmock help guide` prints [docs/guide.md](docs/guide.md), which is built into the binary. It covers:
+Everything needed to write and run suites is built into the binary, so a person or an AI agent with only `dmock` installed can work without this repo:
 
-- the run → read → fix loop;
-- how to read a JSON report;
-- a scenario template;
-- common mistakes that look like bugs but aren't.
+| Command | Prints |
+|---|---|
+| `dmock help guide` | [docs/guide.md](docs/guide.md): the run → read → fix loop, reading a JSON report, a scenario template, mistakes that look like bugs |
+| `dmock help suite` | [docs/suite.md](docs/suite.md): suite layout, every `dmock.yaml` field, the mock spec format |
+| `dmock help steps` | [docs/steps.md](docs/steps.md): every step's arguments, result fields and an example |
+| `dmock help examples` | [docs/examples.md](docs/examples.md): patterns for faults, retries, races and load inside pod limits |
+| `dmock version` | the installed version |
 
 ## dmock.yaml
 
@@ -282,7 +285,7 @@ routes:
 - **State.** Per-key state lives in Mockoon global variables named `<mock>|<field>|<key>`. `dmock mock set` and scenario `mock` steps write them through Mockoon's admin API. Each run gets a random admin token, stored in `.dmock/state.json`.
 - **Raw values.** `${state.x}` and `${key}` are emitted with `{{{ }}}`, so values aren't HTML-escaped. Mockoon's `{{ }}` would turn `=` into `&#x3D;` and break signed or encoded payloads.
 - **Faults.** A fault is a response with rules on `<mock>|fault|<key>` and a hit counter `<mock>|faultn|<key>`. `--times N` serves the fault N times and then falls back to normal. Without `--times`, it lasts until `mock clear`.
-- **Encoded bodies.** `encode` bodies are served with templating disabled, so the bytes reach the client unchanged. Use this for PGP-encrypted or signed fixtures. One limit: a fault on a route with an encoded body has no hit counter, so it lasts until `mock clear`.
+- **Encoded bodies.** `encode` bodies are served with templating disabled, so the bytes reach the client unchanged. Use this for PGP-encrypted or signed fixtures.
 - **Recorded calls.** Calls come from Mockoon's transaction log (last 1000) and are mapped back to route ids.
 
 You can also use Mockoon helpers such as `{{now}}` or `{{faker 'person.firstName'}}` directly in a body.
