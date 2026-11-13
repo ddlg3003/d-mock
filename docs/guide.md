@@ -1,0 +1,89 @@
+# d-mock guide
+
+How to use `dmock` day to day. Run `dmock help guide` to print this from the binary alone.
+
+## What dmock does, in one paragraph
+
+`dmock` runs integration tests on your machine. `stack.yaml` describes what has to be running:
+
+- **deps:** databases, brokers and the like. Each is either a server that already exists (`remote`) or a container dmock starts.
+- **mocks:** fake partner APIs, served by Mockoon.
+- **services:** the code under test, run as local processes.
+
+A `scenario.yaml` is a test: a list of steps (call an API, change a mock, send a Kafka message, start a Temporal workflow, query the DB, read a log), each followed by checks. dmock runs the steps, reports which checks failed and why, then deletes what the test created.
+
+## The loop
+
+```bash
+dmock --json status                      # 1. what is running?
+dmock --json up                          # 2. start what is missing (safe to repeat)
+dmock --json validate scenarios/         # 3. catch YAML mistakes before running
+dmock --json run scenarios/x.yaml        # 4. run; exit 0 = pass, 1 = a check failed, 2 = bad input
+dmock --json logs worker --grep 'ERROR|panic' --tail 50   # 5. on failure, read the service log
+dmock --json mock calls partner --key ID # 6. on failure, see what the service actually sent the mock
+dmock --json down                        # 7. stop everything (remote deps are never touched)
+```
+
+- **Always pass `--json`.** Every command prints exactly one JSON document on stdout:
+  - Success: `{"ok": true, ...}`.
+  - Failure: `{"ok": false, "error": "...", "exit_code": N}`.
+- **Exit codes:**
+  - `0`: ok.
+  - `1`: a scenario check failed, or a component failed to start.
+  - `2`: you gave dmock bad input (YAML, flags, a missing `${env.X}`). Fix the input; don't retry.
+
+## Reading a run report
+
+`run --json` returns `reports[].steps[]`. For each step:
+
+| Field | Meaning |
+|---|---|
+| `passed` | whether every check passed |
+| `failures` | each failed check in words: `json.status: got "WAITING", want "APPROVED"` |
+| `error` | the step itself could not run (connection refused, bad SQL, unknown mock…) |
+| `attempts` | how many times a `retry` step ran |
+| `result` | what the step returned; the paths `expect` can check |
+| `skipped` | an earlier step failed, so this one did not run |
+
+`cleanup[]` lists what was deleted or reset after the run.
+
+## Writing a scenario: template
+
+```yaml
+name: short description of the behaviour under test
+vars:
+  id: "order-${run}"                 # ${run} is unique per run: use it in every id you create
+steps:
+  - name: arrange — partner will approve
+    mock: { name: partner, set: { key: "${vars.id}", state: { status: APPROVED } } }
+  - name: act — create the order
+    http: { method: POST, url: "http://localhost:8080/orders", json: { id: "${vars.id}" } }
+    expect: { status: 201 }
+  - name: assert — eventually approved
+    http: { url: "http://localhost:8080/orders/${vars.id}" }
+    retry: { timeout: 30s, every: 1s }
+    expect: { json.status: APPROVED }
+  - name: assert — partner called exactly once
+    mock: { name: partner, calls: { route: status, key: "${vars.id}" } }
+    expect: { count: 1 }
+```
+
+The [README](../README.md) lists every step type, its arguments and its result fields.
+
+## Mistakes that look like bugs but are not
+
+These came up in real use. Check them before you blame the code under test.
+
+1. **The mock never changes state.** The mock picks its state key from the request (`key:` in the mock spec), and that may not be the id you think. A real case: the loan's partner contract id was `pcid-…`, but the connector sent the contract number `PCN-…`. Run `dmock mock calls NAME` and look at `path`/`body` to see what was really sent, then set the state on that key.
+2. **A check for "nothing happened" passes too early.** `retry` only repeats a step while it fails. A check like "status is still 5" passes at once, even if the thing that could change it hasn't run yet. Put a `sleep` longer than that delay before the check.
+3. **A log check finds nothing.** Services often log enums by name (`SIGN_CONTRACT`), not by number (`5`). Grep the log by hand first (`dmock logs svc --grep ID`), then copy the exact text into the pattern.
+4. **`unresolved reference ${env.X}`.** dmock never fills in defaults. Export the variable before `up` and `run`.
+5. **Two workers on the same Temporal task queue split the work.** Only one of them should be up (`dmock up --only worker-fast`).
+6. **`sql` refuses a write.** On a `remote` dep, every write must contain the run id. That's on purpose: a test may only touch rows it created. Seed with `sql.insert` (its rows are deleted automatically) or with an `exec` step that calls your seed tool.
+
+## Rules dmock enforces (don't try to work around them)
+
+- No DDL (`CREATE/ALTER/DROP/TRUNCATE/...`) on any database.
+- Writes on remote databases must include the run id.
+- `down` never touches remote deps.
+- After every run, dmock deletes the rows it inserted, terminates the workflows it started and resets the mock state it set. Pass `--keep` only to inspect a failure, then clean up by hand.

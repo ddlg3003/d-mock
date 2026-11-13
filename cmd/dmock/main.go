@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 
+	dmock "github.com/ddlg3003/d-mock"
 	"github.com/ddlg3003/d-mock/internal/config"
 	"github.com/ddlg3003/d-mock/internal/mock"
 	"github.com/ddlg3003/d-mock/internal/scenario"
@@ -25,6 +26,8 @@ import (
 const usage = `dmock — local integration-test harness (stack + Mockoon mocks + YAML scenarios)
 
 Usage: dmock [global flags] <command> [args]
+
+New here? Run: dmock help guide
 
 Global flags (anywhere on the line):
   -f, --file PATH        stack file (default ./stack.yaml, or $DMOCK_STACK)
@@ -45,6 +48,9 @@ Mocks:
   mock calls NAME [--route ID] [--key K]         recorded requests
   mock reset NAME                                clear all state, faults and recorded calls
   mock compile NAME                              print the generated Mockoon environment
+
+Help:
+  help [TOPIC]                                   usage, or a topic (guide); "dmock guide" = "dmock help guide"
 
 Scenarios:
   run FILE|DIR... [--dry-run] [--keep] [--run-id ID] [--verbose]
@@ -121,6 +127,23 @@ func run(argv []string) int {
 		if len(c.args) == 0 {
 			return 2
 		}
+		return 0
+	}
+	if c.args[0] == "help" || c.args[0] == "guide" { // needs no stack.yaml
+		topic := "guide"
+		if c.args[0] == "help" {
+			if len(c.args) < 2 {
+				fmt.Print(usage)
+				fmt.Println("\nHelp topics: dmock help guide")
+				return 0
+			}
+			topic = c.args[1]
+		}
+		text, ok := dmock.HelpTopics[topic]
+		if !ok {
+			return c.fail(2, fmt.Errorf("unknown help topic %q (topics: guide)", topic))
+		}
+		fmt.Print(text)
 		return 0
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)

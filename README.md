@@ -1,22 +1,45 @@
 # d-mock
 
-A local integration-test harness that people and coding agents can drive from the command line.
+**Run integration tests against a real stack on your own machine, from one YAML file and one CLI.**
 
-d-mock starts a whole test stack from one `stack.yaml`:
-
-- **deps**: infrastructure, either an existing server (`remote`) or a local container.
-- **mocks**: partner APIs, served by [Mockoon](https://mockoon.com) from a short YAML spec.
-- **services**: your own codebases, run as supervised subprocesses.
-
-It then runs `scenario.yaml` files against the stack: seed data, flip mock state, inject faults, send Kafka messages, start or signal Temporal workflows, wait, and assert. Everything a scenario creates is cleaned up afterwards.
+d-mock starts what your services need: databases, brokers, mocked external APIs, and the services themselves. It then runs YAML test scenarios against that stack and cleans up after each run. It's built for the tests that are hard to write as unit tests: callbacks racing polls, retries, timeouts, third-party outages, and workflows that span several services.
 
 ```
-stack.yaml  ──dmock up──▶  deps (remote | container)   mocks (Mockoon)   services (your code)
-                                     ▲                       ▲                   ▲
-scenario.yaml ──dmock run──▶  sql / kafka / temporal    mock set/fault/calls   http / exec / log
+stack.yaml    ──dmock up──▶   deps              mocks                services
+                              (remote or        (HTTP APIs via       (the code under
+                               container)        Mockoon)             test, as processes)
+                                  ▲                  ▲                    ▲
+scenario.yaml ──dmock run──▶  sql · kafka ·     mock set · fault ·   http · exec · log
+                              temporal          calls
 ```
 
-Each dep can run differently on each run. For example, Kafka and MySQL can use a shared dev server while Redis runs in a local container. You choose per dep with `mode`, or override it for one command with `--mode redis=remote`.
+## Features
+
+**Stack**
+- **One file for the whole stack.** `stack.yaml` lists the dependencies, mocked APIs and services, with readiness checks and start order.
+- **Choose per dependency: real or local.** Each dependency either points at an existing server (`remote`) or runs in a container. Switch for one run with `--mode db=container`.
+- **Generated service configs.** Config files are templates (`${deps.db.dsn}`, `${mocks.payments.url}`, `${env.TOKEN}`). A missing value is an error, never a silent default.
+- **Safe to repeat.** `up` starts only what is down and restarts a mock when its spec changed. `down` never touches remote dependencies.
+
+**Mocks** (on [Mockoon](https://mockoon.com))
+- **Short YAML instead of Mockoon JSON.** Routes, responses and variants compile to a Mockoon environment.
+- **Per-request state.** Each request is keyed by a URL param, body field or header, so every test entity gets its own answer: `dmock mock set payments order-1 status=APPROVED`.
+- **Fault injection.** HTTP 500s, timeouts or any custom response, for N calls or until cleared: `dmock mock fault payments order-1 http500 --times 3`.
+- **Call recording.** Assert exactly what your service sent, how often and in what order.
+- **Raw and encoded bodies.** Values are never HTML-escaped. Pre-encrypted or signed fixtures are served byte for byte.
+
+**Scenarios**
+- **One YAML format for every kind of step.** `http`, `exec`, `sql`, `kafka`, `temporal`, `mock`, `log` and `sleep`, each with `expect`, `save` and `retry`.
+- **Rich checks.** `eq`, `ne`, `contains`, `match`, `gt`/`gte`/`lt`/`lte`, `len` and `exists` on any path of a step's result, including list items (`calls.0.status`).
+- **Waiting for asynchronous results.** `retry: { timeout: 30s, every: 1s }` polls a step until its checks pass.
+- **Isolated runs.** Every run gets a unique `${run}` id to put in the data it creates, so runs never collide on shared servers.
+- **Automatic cleanup.** Inserted rows are deleted, started workflows are terminated, and mock state is reset, even when the test fails.
+
+**Safety and output**
+- **Guardrails on shared servers.** No DDL on any database, and every write on a remote database must include the run id.
+- **Machine-readable.** Every command supports `--json`, and exit codes are fixed: `0` ok, `1` failed, `2` bad input.
+- **Readable failures.** Failed checks are reported in words, e.g. `json.status: got "WAITING", want "APPROVED"`.
+- **Built-in docs.** `dmock help guide` works without the repo.
 
 ## Install
 
@@ -30,26 +53,26 @@ The container engine is `docker`, or `podman` if docker isn't installed. Overrid
 
 ## Quick start
 
-The example has a toy `orders` service that waits for a partner decision. The decision arrives one of three ways: a callback (signal path), polling the partner (poll path), or a cancel at the partner on timeout.
+The example is a small `orders` service that waits for a decision from an external API. The decision arrives one of three ways: a callback, polling the API, or a cancel on timeout.
 
 ```bash
 make e2e
 # or step by step:
 cd examples/orders
-dmock up                 # redis container + partner mock + orders service
+dmock up                 # redis container + API mock + orders service
 dmock run scenarios      # 3 scenarios
 dmock down
 ```
 
 ```
-▶ poll path — partner fails twice, then approves
-  ✓ partner answers HTTP 500 for the next 2 polls [mock] 2ms
-  ✓ partner has approved [mock] 1ms
+▶ poll path — API fails twice, then approves
+  ✓ API answers HTTP 500 for the next 2 polls [mock] 2ms
+  ✓ API has approved [mock] 1ms
   ✓ create order (no callback will come) [http] 4ms
   ✓ order approved by polling [http] 4.1s (9 attempts)
   ✓ exactly 3 polls (500, 500, 200) [mock] 3ms
   ...
-PASS poll path — partner fails twice, then approves run=dm582f22 5.1s
+PASS poll path — API fails twice, then approves run=dm582f22 5.1s
 ```
 
 ## CLI
@@ -75,13 +98,14 @@ run FILE|DIR... [--dry-run] [--keep] [--run-id ID] [--verbose]
 
 **Exit codes:** `0` ok, `1` failed (a scenario failed or a component errored), `2` usage or config error.
 
-### For agents
+### Guide
 
-- Add `--json` to any command for a single JSON document on stdout. Errors come back as `{"ok": false, "error": "...", "exit_code": N}`.
-- `up` is idempotent: run it before every test session. It starts only what is down, and restarts a mock by itself when its spec changed. Use `--restart svc` after changing a service's code.
-- `status --json` tells you what is running. `logs svc --grep 'ERROR|panic' --tail 50` is the fastest way to find out why something failed.
-- `run --json` reports, per step, the result, the attempts, and every failed expectation in words, for example `json.status: got "WAITING", want "APPROVED"`.
-- Everything lives in `.dmock/` next to `stack.yaml`: `state.json`, `logs/<name>.log`, `mocks/<name>.json` and `rendered/<service>.*`.
+`dmock help guide` prints [docs/guide.md](docs/guide.md), which is built into the binary. It covers:
+
+- the run → read → fix loop;
+- how to read a JSON report;
+- a scenario template;
+- common mistakes that look like bugs but aren't.
 
 ## stack.yaml
 
@@ -243,11 +267,14 @@ expect:
 - **`--keep`** skips this automatic cleanup so you can inspect the state. Explicit `cleanup:` steps still run.
 - **`--dry-run`** expands and prints each step without running it.
 
-## Why not Venom?
+## Why d-mock has its own scenario runner (and not Venom)
 
-[Venom](https://github.com/ovh/venom) was the first candidate for the scenario engine. Its user executors are YAML compositions of the built-in executors, with no hook for Go code. The Temporal and mock steps would end up as `exec` calls to this CLI, and run-id scoping, the cleanup ledger and the SQL write guard would sit outside it.
+[Venom](https://github.com/ovh/venom) is an existing tool for YAML test steps (HTTP, SQL, Kafka…). Using it as the scenario engine was the first idea. It was dropped for two reasons:
 
-A small built-in runner keeps d-mock to a single binary with one JSON report format. The `exec` step can still call `venom run` if you already have Venom suites.
+1. **It can't be extended in Go.** New Venom step types can only combine existing ones in YAML. The steps d-mock needs most (`temporal`, `mock set/fault/calls`) would each have become "run a shell command that calls dmock".
+2. **The safety features would live outside it.** Putting the run id on every write, the SQL write guard, and deleting test rows and workflows after a run all need to see every step. Wrapped around Venom, they would be glue scripts, not guarantees.
+
+So d-mock has a small built-in runner: one binary and one JSON report format. If you already have Venom suites, call them from an `exec` step: `exec: { cmd: "venom run suite.yml" }`.
 
 ## Development
 
@@ -263,6 +290,6 @@ make e2e    # example stack up → 3 scenarios → down
 | Stack lifecycle (container deps via docker/podman, mockoon-cli mocks, services) | Tested end to end with the example |
 | Mock compiler and admin API | Tested live against Mockoon CLI 9.10 |
 | `http`, `mock`, `log`, `sleep`, `exec` steps | Tested end to end |
-| `temporal` steps | Tested against `temporal server start-dev` |
-| `sql` and `kafka` steps | Built and unit-tested for safety rules; not yet run against a live server in this repo |
+| `temporal` steps | Tested against `temporal server start-dev` and a remote TLS cluster |
+| `sql` and `kafka` steps | Used against a shared MySQL server and Kafka broker (reads, plus writes scoped to the run id) |
 | `mockoon.runner: docker` | Not tested yet |
