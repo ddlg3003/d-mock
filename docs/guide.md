@@ -87,6 +87,7 @@ These came up in real use. Check them before you blame the code under test.
 
 - No DDL (`CREATE/ALTER/DROP/TRUNCATE/...`) on any database.
 - Writes on remote databases must include the run id (in the statement or args, not in a comment). Anything that isn't a plain read counts as a write, including `CALL` and `SET`. One statement per step.
+- Stack files in one folder share `.dmock/`, so only one of them can be up at a time. d-mock refuses to act on another project's running state; `down` that one first.
 - `mock set` / `mock fault` (CLI and steps) reject a state field or fault the spec doesn't declare, and unknown CLI flags are an error, so typos fail loudly.
 - `down` never touches remote deps.
 - After every run, dmock deletes the rows it inserted, terminates the workflows it started and resets the mock state it set. Pass `--keep` only to inspect a failure, then clean up by hand.

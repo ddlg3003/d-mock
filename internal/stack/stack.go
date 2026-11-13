@@ -112,7 +112,7 @@ func (r *Runner) Up(ctx context.Context, opt UpOptions) ([]Item, error) {
 	if err := os.MkdirAll(filepath.Join(r.Dir, "logs"), 0o755); err != nil {
 		return nil, err
 	}
-	st, err := LoadState(r.Stack.Dir)
+	st, err := r.State()
 	if err != nil {
 		return nil, err
 	}
@@ -526,7 +526,7 @@ func (r *Runner) ServiceStatus(name string) (Item, *ContainerStats, error) {
 	if _, ok := r.Stack.Services[name]; !ok {
 		return Item{}, nil, fmt.Errorf("no service named %q", name)
 	}
-	st, err := LoadState(r.Stack.Dir)
+	st, err := r.State()
 	if err != nil {
 		return Item{}, nil, err
 	}
@@ -580,7 +580,7 @@ func (r *Runner) stopMock(m *MockState) {
 // Down stops services (reverse order), mocks and containers this stack started.
 // Remote deps are never touched. only limits it to some names.
 func (r *Runner) Down(only []string) ([]Item, error) {
-	st, err := LoadState(r.Stack.Dir)
+	st, err := r.State()
 	if err != nil {
 		return nil, err
 	}
@@ -651,7 +651,7 @@ func (r *Runner) Down(only []string) ([]Item, error) {
 
 // Status reports every component of stack.yaml and whether it is running.
 func (r *Runner) Status() ([]Item, error) {
-	st, err := LoadState(r.Stack.Dir)
+	st, err := r.State()
 	if err != nil {
 		return nil, err
 	}
@@ -700,7 +700,7 @@ func (r *Runner) MockAdmin(name string) (*mock.Admin, *mock.Spec, error) {
 	if !ok {
 		return nil, nil, fmt.Errorf("no mock named %q (have: %s)", name, strings.Join(config.SortedKeys(r.Stack.Mocks), ", "))
 	}
-	st, err := LoadState(r.Stack.Dir)
+	st, err := r.State()
 	if err != nil {
 		return nil, nil, err
 	}

@@ -74,7 +74,7 @@ func (r *Runner) Run(ctx context.Context, sc *Scenario) (*Report, error) {
 	if id == "" {
 		id = NewRunID()
 	}
-	st, err := stack.LoadState(r.Stack.Stack.Dir)
+	st, err := r.Stack.State()
 	if err != nil {
 		return nil, err
 	}

@@ -3,6 +3,7 @@ package stack
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -83,4 +84,22 @@ func (s *State) Save(dir string) error {
 		return err
 	}
 	return os.Rename(tmp, statePath(dir))
+}
+
+// inUse reports whether the state still records something started.
+func (s *State) inUse() bool { return len(s.Deps)+len(s.Mocks)+len(s.Services) > 0 }
+
+// State loads the saved state and checks it belongs to this stack. Every stack file in a
+// folder shares .dmock/, so `up` with stack.load.yaml while stack.yaml is up would overwrite
+// the first stack's state, and its `down` would then stop the wrong processes.
+func (r *Runner) State() (*State, error) {
+	st, err := LoadState(r.Stack.Dir)
+	if err != nil {
+		return nil, err
+	}
+	if st.Project != "" && st.Project != r.Stack.Project && st.inUse() {
+		return nil, fmt.Errorf("%s holds the running stack of project %q, not %q: take that one down first (dmock -f <its stack file> down), or keep this stack file in its own folder",
+			statePath(r.Stack.Dir), st.Project, r.Stack.Project)
+	}
+	return st, nil
 }

@@ -113,15 +113,16 @@ func compileRoute(mock string, r Route, specDir string) (map[string]any, error) 
 		n := varExpr(mock, "faultn", r)
 		decrement := fmt.Sprintf("{{#unless (eq %s 'inf')}}{{setGlobalVar (concat '%s' %s) (subtract %s 1)}}{{/unless}}",
 			n, escapeSQ(VarName(mock, "faultn", "")), keyExpr(r), n)
+		// The counter goes down in the last rule, not in the body: rules run when the request
+		// arrives (AND stops at the first false rule, so only a request that gets this fault
+		// counts), while the body is rendered after the latency. With the decrement in the body,
+		// every call arriving during a latency fault's delay would get the fault too.
 		rules := []map[string]any{
 			rule("{{"+unwrap(varExpr(mock, "fault", r))+"}}", fname, "equals"),
 			rule("{{"+unwrap(n)+"}}", "^([1-9][0-9]*|inf)$", "regex"),
+			rule(decrement+"hit", "hit", "equals"),
 		}
-		if static {
-			// a pre-encoded body can't carry the counter template: the fault then lasts until cleared
-			decrement = ""
-		}
-		responses = append(responses, response(mock, r.ID, "fault:"+fname, status, r.Headers, decrement+body, f.Latency.Milliseconds(), rules, false, static))
+		responses = append(responses, response(mock, r.ID, "fault:"+fname, status, r.Headers, body, f.Latency.Milliseconds(), rules, false, static))
 	}
 
 	for i, v := range r.Variants {

@@ -4,6 +4,8 @@ import (
 	"net"
 	"os"
 	"testing"
+
+	"github.com/ddlg3003/d-mock/internal/config"
 )
 
 // TestTCPReady: a forwarder that accepts then closes (podman before the app listens) is
@@ -51,5 +53,26 @@ func TestOursChecksStartTime(t *testing.T) {
 	}
 	if ours(pid, "Thu Jan  1 00:00:00 1970") {
 		t.Error("reused pid (different start time) treated as ours")
+	}
+}
+
+func TestStateBelongsToProject(t *testing.T) {
+	dir := t.TempDir()
+	a := New(&config.Stack{Project: "a", Dir: dir})
+	st := &State{Project: "a", Deps: map[string]*DepState{}, Mocks: map[string]*MockState{"m": {Port: 1}}, Services: map[string]*ServiceState{}}
+	if err := st.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.State(); err != nil {
+		t.Fatalf("own state rejected: %v", err)
+	}
+	b := New(&config.Stack{Project: "b", Dir: dir})
+	if _, err := b.State(); err == nil {
+		t.Fatal("another project's running state accepted")
+	}
+	st.Mocks = map[string]*MockState{}
+	st.Save(dir)
+	if _, err := b.State(); err != nil {
+		t.Fatalf("empty state of another project should be free to take over: %v", err)
 	}
 }
