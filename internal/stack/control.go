@@ -81,8 +81,7 @@ func (r *Runner) Running(name string) (bool, error) {
 		}
 		return containerRunning(containerName(r.Stack.Project, name)), nil
 	case "mock":
-		ms := st.Mocks[name]
-		return ms != nil && (ours(ms.PID, ms.PIDStart) || (ms.Container != "" && containerRunning(ms.Container))), nil
+		return st.Mocks[name].running(), nil
 	case "service":
 		return st.Services[name].running(), nil
 	}
@@ -125,6 +124,9 @@ func (r *Runner) halt(name, kind string, hard bool) error {
 		ms := st.Mocks[name]
 		if ms == nil {
 			return fmt.Errorf("mock %s is not running", name)
+		}
+		if ms.ProxyPID > 0 {
+			stopProc(ms.ProxyPID, ms.ProxyStart, 5*time.Second)
 		}
 		if ms.Container != "" {
 			return stopContainer(ms.Container)

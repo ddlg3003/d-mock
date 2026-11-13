@@ -30,13 +30,14 @@ scenario.yaml ──dmock run──▶  sql · kafka ·     mock set · fault ·
 - **Per-request state.** Each request is keyed by a URL param, body field or header, so every test entity gets its own answer: `dmock mock set payments order-1 status=APPROVED`.
 - **Fault injection.** HTTP 500s, timeouts or any custom response, for N calls or until cleared: `dmock mock fault payments order-1 http500 --times 3`.
 - **Call recording.** Assert exactly what your service sent (body, query, headers), how often and in what order.
-- **Raw and encoded bodies.** Values are never HTML-escaped. Pre-encrypted or signed fixtures are served byte for byte.
+- **Encoded and encrypted payloads.** Values are never HTML-escaped. Fixed encrypted or signed fixtures are served byte for byte; with a `codec`, d-mock decrypts each request before the mock sees it and encrypts each answer per request, so state, faults and recorded calls work on plain data and answers can echo the request.
 
 **Scenarios**
 - **One YAML format for every kind of step.** `http`, `exec`, `sql`, `kafka` (produce and consume), `temporal`, `mock`, `log`, `service`, `stack`, `parallel`, `k6` and `sleep`, each with `expect`, `save` and `retry`.
 - **Races.** A `parallel` step fires steps at the same moment (double submits, a callback racing a poll), optionally offset with `after: 200ms`, and checks the outcome whoever wins: `count.status.202: 1`.
 - **Outages and crashes.** A `stack` step stops, kills or restarts a database, a mock or a service mid-scenario; whatever it took down comes back after the run.
 - **Events.** `kafka: { consume: { topic, key } }` asserts what your service published, without a consumer group.
+- **Encrypted calls into your service.** `http` with `encode` / `decode` sends an encrypted body built for the run (a callback, a webhook) and reads an encrypted answer.
 - **Table-driven and repeated runs.** `matrix` runs a scenario once per case; `repeat: 20` shakes out flaky races.
 - **Shared steps and hooks.** `include` reuses step lists; suite hooks (`before_all`, `before_each`, `after_each`, `after_all`) run checks and setup around every scenario.
 - **Load tests with [k6](https://k6.io).** A `k6` step runs your script and turns its summary into checkable values: `metrics.http_req_duration.p95: { lt: 500 }`. Combine load with mock faults and resource limits to answer "does it survive a slow third party with 256 MiB?".
@@ -47,6 +48,7 @@ scenario.yaml ──dmock run──▶  sql · kafka ·     mock set · fault ·
 - **Automatic cleanup.** Inserted rows are deleted, started workflows are terminated, and mock state is reset, even when the test fails.
 
 **Safety and output**
+- **Values never become commands.** In any shell line, each `${...}` is one quoted word, so an answer from the system under test or a DSN with `&` can't run as shell syntax; encoders and decoders are argv commands with a timeout and size limit.
 - **Guardrails on shared servers.** No DDL on any database, every write on a remote database must include the run id, and `k6` load refuses to run while any dep is remote unless you pass `--allow-remote-load`.
 - **Machine-readable.** Every command supports `--json`, and exit codes are fixed: `0` ok, `1` failed, `2` bad input.
 - **Readable failures.** Failed checks are reported in words, e.g. `json.status: got "WAITING", want "APPROVED"`.
@@ -60,6 +62,7 @@ Start here if you want to see how you'd use d-mock on your own service:
   - *"If the provider times out, do we charge twice?"*: a scenario breaks the provider for one order, then checks the DB, every call the provider received, and the logs.
   - *"Double click: charged twice?"*, *"MySQL down: 503 and recovery?"*, *"Is the PAID event published?"*, *"Every provider answer → the right status?"*: `parallel`, `stack`, `kafka consume` and `matrix` in action, with suite hooks and an `after_ready` migration.
   - *"Will it survive launch day inside its pod?"*: k6 load against the service in a container limited to 500m CPU and 128Mi. It checks p95, errors, OOM, and that every accepted checkout really got charged.
+- **[`examples/encrypted`](examples/encrypted)**: a third-party API whose payloads are encrypted. A `codec` mock echoes the request inside an encrypted answer; scenarios check the service refuses an answer about another reference and a forged callback.
 - **[`examples/orders`](examples/orders)**: a callback racing a poll, faults and timeouts, plus a real OOM kill under a memory limit. This is the repo's own end-to-end test (`make e2e`).
 
 ## Install
@@ -203,5 +206,6 @@ make e2e-all        # every example suite, including containers and k6 load
 | `sql` and `kafka` steps | Used against a shared MySQL server and Kafka broker (reads, plus writes scoped to the run id) |
 | Container services (build, limits, host access, OOM detection) | Tested end to end with podman (`examples/orders/containers`) |
 | `parallel`, `stack`, `kafka` consume, `matrix`/`repeat`, `include`, hooks, `after_ready` | Tested end to end (`examples/checkout`: double submit, DB outage, order event, provider answers) |
+| Mock `codec`, `http` `encode`/`decode`, shell quoting of references | Tested end to end (`examples/encrypted`) and with unit tests against a real `sh` |
 | `k6` step | Tested end to end (load against a 0.5 CPU / 64 MiB container; OOM shown in the failing step) |
 | `mockoon.runner: docker` | Not tested yet |

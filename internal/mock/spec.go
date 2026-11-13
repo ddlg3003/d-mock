@@ -13,13 +13,46 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Spec is one mocked partner API.
+// Spec is one mocked third-party API.
 type Spec struct {
+	// Codec, when set, puts d-mock in front of Mockoon to decode every request body and
+	// encode every response body per request (encrypted or signed payloads). A route's own
+	// codec replaces it.
+	Codec  *Codec  `yaml:"codec"`
 	Routes []Route `yaml:"routes"`
 }
 
+// Codec is a pair of commands (argv lists, run from the spec's folder, payload on stdin,
+// result on stdout). decode turns an incoming request body into plain text before Mockoon
+// sees it (so key, state and recorded calls work on it); encode turns each response body,
+// after templating, into what is sent back. Either may be left out.
+type Codec struct {
+	Decode []string `yaml:"decode"`
+	Encode []string `yaml:"encode"`
+}
+
+func (c *Codec) empty() bool { return c == nil || (len(c.Decode) == 0 && len(c.Encode) == 0) }
+
+// RouteCodec is the codec that applies to a route: its own, else the spec's.
+func (s *Spec) RouteCodec(r *Route) *Codec {
+	if r.Codec != nil {
+		return r.Codec
+	}
+	return s.Codec
+}
+
+// HasCodec reports whether any route needs the codec proxy.
+func (s *Spec) HasCodec() bool {
+	for i := range s.Routes {
+		if !s.RouteCodec(&s.Routes[i]).empty() {
+			return true
+		}
+	}
+	return false
+}
+
 // Route is one endpoint. Key is a Mockoon Handlebars expression that picks the state key
-// out of the request, e.g. "urlParam 'id'", "bodyRaw 'loan_id'", "queryParam 'ref'".
+// out of the request, e.g. "urlParam 'id'", "bodyRaw 'order_id'", "queryParam 'ref'".
 // Without a key, all requests to the route share one state ("_").
 type Route struct {
 	ID      string            `yaml:"id"`
@@ -38,6 +71,8 @@ type Route struct {
 	// Variants are alternative responses picked when every `when` state field matches.
 	Variants []Variant        `yaml:"variants"`
 	Faults   map[string]Fault `yaml:"faults"`
+	// Codec replaces the spec's codec for this route (`codec: {}` = none).
+	Codec *Codec `yaml:"codec"`
 }
 
 type Variant struct {
@@ -81,6 +116,15 @@ func LoadSpec(path string) (*Spec, error) {
 		seen[r.ID] = true
 		if r.Body != "" && r.BodyFile != "" {
 			return nil, fmt.Errorf("%s: route %s sets both body and body_file", path, r.ID)
+		}
+		if c := s.RouteCodec(&s.Routes[i]); c != nil && len(c.Encode) > 0 {
+			static := len(r.Encode) > 0
+			for _, v := range r.Variants {
+				static = static || len(v.Encode) > 0
+			}
+			if static {
+				return nil, fmt.Errorf("%s: route %s has both a codec encode (per request) and a static encode (once at start): keep one", path, r.ID)
+			}
 		}
 	}
 	return s, nil

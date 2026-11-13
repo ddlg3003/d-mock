@@ -246,7 +246,7 @@ func (ru *run) runStep(ctx context.Context, step Step, i int) (res StepResult) {
 				res.Passed, res.Result = true, out
 				return res
 			}
-		} else if args, err = tmpl.ExpandAny(rawArgs, ru.data); err == nil {
+		} else if args, err = expandArgs(typ, rawArgs, ru.data); err == nil {
 			if ru.r.Opt.DryRun {
 				res.Passed = true
 				res.Result = map[string]any{"args": args}
@@ -331,9 +331,9 @@ func summarize(m map[string]any) map[string]any {
 func (ru *run) exec(ctx context.Context, typ string, args map[string]any) (map[string]any, error) {
 	switch typ {
 	case "http":
-		return execHTTP(ctx, args)
+		return execHTTP(ctx, args, ru.suiteDir())
 	case "exec":
-		return execCmd(ctx, args, ru.r.Stack.Stack.Dir)
+		return execCmd(ctx, args, ru.suiteDir())
 	case "sql":
 		return ru.execSQL(ctx, args)
 	case "kafka":
@@ -363,4 +363,54 @@ func (ru *run) exec(ctx context.Context, typ string, args map[string]any) (map[s
 		return map[string]any{"slept": d.String()}, nil
 	}
 	return nil, fmt.Errorf("unknown step type %s", typ)
+}
+
+// expandArgs fills in a step's references. A command a shell will read (exec's cmd as a
+// line, or an argv list starting `sh -c`) gets each reference quoted as one literal word,
+// so a value from the system under test can never run as shell syntax.
+func expandArgs(typ string, raw any, data map[string]any) (any, error) {
+	a, ok := raw.(map[string]any)
+	if typ != "exec" || !ok {
+		return tmpl.ExpandAny(raw, data)
+	}
+	rest := make(map[string]any, len(a))
+	for k, v := range a {
+		if k != "cmd" {
+			rest[k] = v
+		}
+	}
+	x, err := tmpl.ExpandAny(rest, data)
+	if err != nil {
+		return nil, err
+	}
+	out := x.(map[string]any)
+	switch c := a["cmd"].(type) {
+	case string:
+		line, err := tmpl.ExpandShell(c, data)
+		if err != nil {
+			return nil, err
+		}
+		out["cmd"] = line
+	case []any:
+		argv, err := tmpl.ExpandArgv(strList(c), data)
+		if err != nil {
+			return nil, err
+		}
+		l := make([]any, len(argv))
+		for i, s := range argv {
+			l[i] = s
+		}
+		out["cmd"] = l
+	default:
+		out["cmd"] = c
+	}
+	return out, nil
+}
+
+// suiteDir is where commands (exec, encode, decode) run: the suite folder.
+func (ru *run) suiteDir() string {
+	if ru.r == nil || ru.r.Stack == nil || ru.r.Stack.Stack == nil {
+		return "."
+	}
+	return ru.r.Stack.Stack.Dir
 }

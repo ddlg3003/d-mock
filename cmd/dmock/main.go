@@ -15,6 +15,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"syscall"
 
 	dmock "github.com/ddlg3003/d-mock"
 	"github.com/ddlg3003/d-mock/internal/config"
@@ -144,6 +145,9 @@ func run(argv []string) int {
 			return 2
 		}
 		return 0
+	}
+	if c.args[0] == mockProxyCmd { // internal: started by `up` for a mock with a codec
+		return c.mockProxy()
 	}
 	if c.args[0] == "doctor" { // works with or without a suite
 		return c.doctor()
@@ -369,11 +373,20 @@ func (c *cli) validate(r *stack.Runner) int {
 	if _, err := scenario.LoadHooks(r.Stack); err != nil {
 		problems = append(problems, err.Error())
 	}
+	warnings := r.Stack.Warnings()
 	if c.json {
-		c.out(map[string]any{"ok": len(problems) == 0, "problems": problems})
-	} else if len(problems) == 0 {
-		fmt.Println("ok")
+		out := map[string]any{"ok": len(problems) == 0, "problems": problems}
+		if len(warnings) > 0 {
+			out["warnings"] = warnings
+		}
+		c.out(out)
 	} else {
+		for _, w := range warnings {
+			fmt.Println("! warning:", w)
+		}
+		if len(problems) == 0 {
+			fmt.Println("ok")
+		}
 		for _, p := range problems {
 			fmt.Println("✗", p)
 		}
@@ -619,4 +632,25 @@ func (c *cli) test(ctx context.Context, r *stack.Runner) int {
 		return c.fail(1, derr)
 	}
 	return code
+}
+
+// mockProxyCmd is the hidden command `up` runs in front of Mockoon for a mock with a codec:
+// dmock __mock-proxy LISTEN_ADDR UPSTREAM_URL SPEC_PATH
+const mockProxyCmd = stack.MockProxyCmd
+
+func (c *cli) mockProxy() int {
+	if len(c.args) != 4 {
+		return c.fail(2, fmt.Errorf("usage: dmock %s LISTEN_ADDR UPSTREAM_URL SPEC_PATH", mockProxyCmd))
+	}
+	spec, err := mock.LoadSpec(c.args[3])
+	if err != nil {
+		return c.fail(2, err)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	p := &mock.Proxy{Spec: spec, Dir: filepath.Dir(c.args[3]), Upstream: c.args[2]}
+	if err := p.Serve(ctx, c.args[1]); err != nil {
+		return c.fail(1, err)
+	}
+	return 0
 }

@@ -295,7 +295,7 @@ func (sc *Scenario) matrixAxes() ([]axis, error) {
 
 // Expand turns one scenario into its runs: one per matrix combination (first key varies
 // slowest), each repeated `repeat` times. Names get the case and the iteration, e.g.
-// "callback moves the loan [partner=CAKE case={callback:APPROVED want:DISBURSED}] #2".
+// "callback settles the order [region=EU case={callback:APPROVED want:DONE}] #2".
 func (sc *Scenario) Expand() ([]*Scenario, error) {
 	axes, err := sc.matrixAxes()
 	if err != nil {

@@ -1,0 +1,12 @@
+name: declined — the API's DECLINED is kept
+vars:
+  ref: "ref-${run}"
+  api: "http://localhost:18095"
+
+steps:
+  - name: the API will decline this ref
+    mock: { name: secure-api, set: { key: "${vars.ref}", state: { status: DECLINED } } }
+
+  - name: ask
+    http: { method: POST, url: "${vars.api}/requests", json: { ref: "${vars.ref}" } }
+    expect: { status: 200, json.status: DECLINED }

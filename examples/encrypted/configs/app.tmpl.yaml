@@ -1,0 +1,5 @@
+# app's normal config file; d-mock fills in where the API is.
+listen: ":18095"
+api_url: "${mocks.secure-api.url}"
+key_file: "${stack.dir}/codec/demo.key"
+api_timeout: 2s

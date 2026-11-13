@@ -1,4 +1,4 @@
-# The orders suite: the toy service in toy/ as a local process, with Redis and a partner mock.
+# The orders suite: the toy service in toy/ as a local process, with Redis and a decision API mock.
 #   dmock test .             (or from the repo root: make e2e)
 # The same service in a container with k8s-like limits is the nested suite containers/.
 project: orders-example
@@ -16,7 +16,7 @@ deps:
     ready: { tcp: "localhost:16379", timeout: 30s }
 
 mocks:
-  partner: { port: 13001 }     # spec: mocks/partner.yaml
+  decisions: { port: 13001 }     # spec: mocks/decisions.yaml
 
 services:
   orders:                      # config: configs/orders.tmpl.yaml
@@ -24,4 +24,4 @@ services:
     cmd: ["go", "run", "."]
     env: { ORDERS_CONFIG: "${services.orders.config}" }
     ready: { http: "http://localhost:18080/healthz", timeout: 90s }
-    depends_on: [redis, partner]
+    depends_on: [redis, decisions]

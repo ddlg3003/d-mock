@@ -12,7 +12,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Stack is the whole local test stack: dependencies, partner mocks and our own services.
+// Stack is the whole local test stack: dependencies, mocks of third-party APIs and our own services.
 type Stack struct {
 	Project  string              `yaml:"project"`
 	Deps     map[string]*Dep     `yaml:"deps"`
@@ -67,7 +67,7 @@ func (d *Dep) Vars() map[string]any {
 	return nil
 }
 
-// Mock is one partner API served by Mockoon from a d-mock mock spec.
+// Mock is one third-party API served by Mockoon from a d-mock mock spec.
 type Mock struct {
 	Spec string `yaml:"spec"` // default: mocks/<name>.yaml
 	Port int    `yaml:"port"`
@@ -370,6 +370,24 @@ func (c *Command) UnmarshalYAML(n *yaml.Node) error {
 		return nil
 	}
 	return fmt.Errorf("line %d: a command is a string or a list", n.Line)
+}
+
+// Warnings are suite choices that work but lose d-mock features (lint prints them; they
+// don't fail it).
+func (s *Stack) Warnings() []string {
+	var out []string
+	for _, n := range SortedKeys(s.Services) {
+		svc := s.Services[n]
+		runsMockoon := strings.Contains(strings.Join(svc.Cmd, " "), "mockoon")
+		if svc.Container != nil && strings.Contains(svc.Container.Image, "mockoon") {
+			runsMockoon = true
+		}
+		if runsMockoon {
+			out = append(out, fmt.Sprintf("service %s runs Mockoon itself: as a service it has no `mock set/fault/calls`, no per-key state and no cleanup. "+
+				"Declare it under mocks: with a spec in mocks/%s.yaml instead (encoded or encrypted payloads: body_file + encode, or a codec)", n, n))
+		}
+	}
+	return out
 }
 
 // HookNames are the suite hooks, in the order they run.

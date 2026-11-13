@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ddlg3003/d-mock/internal/codec"
 	"io"
 	"net/http"
 	"os"
@@ -65,9 +66,9 @@ func parseJSON(s string) (any, bool) {
 
 // ---- http ----------------------------------------------------------------
 
-// http: {method, url, headers, body (text) | json (object), timeout}
-// result: {status, body, json, headers}
-func execHTTP(ctx context.Context, a map[string]any) (map[string]any, error) {
+// http: {method, url, headers, body (text) | json (object), encode, decode, timeout}
+// result: {status, body, json, headers} (+ decoded when decode is set)
+func execHTTP(ctx context.Context, a map[string]any, baseDir string) (map[string]any, error) {
 	method := strings.ToUpper(str(a, "method"))
 	if method == "" {
 		method = http.MethodGet
@@ -83,6 +84,23 @@ func execHTTP(ctx context.Context, a map[string]any) (map[string]any, error) {
 		headers["Content-Type"] = "application/json"
 	} else if b, ok := a["body"]; ok {
 		body = strings.NewReader(tmpl.Stringify(b))
+	}
+	// encode: the request body (references already filled in) goes through a command
+	// (encrypt, sign…) and its output is what is sent
+	if enc, ok := a["encode"]; ok {
+		argv, err := argvOf(enc, "http encode")
+		if err != nil {
+			return nil, err
+		}
+		var plain []byte
+		if body != nil {
+			plain, _ = io.ReadAll(body)
+		}
+		out, err := codec.Run(ctx, argv, baseDir, plain)
+		if err != nil {
+			return nil, fmt.Errorf("http encode: %w", err)
+		}
+		body = bytes.NewReader(out)
 	}
 	timeout := 30 * time.Second
 	if t := str(a, "timeout"); t != "" {
@@ -113,7 +131,22 @@ func execHTTP(ctx context.Context, a map[string]any) (map[string]any, error) {
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	out := map[string]any{"status": resp.StatusCode, "body": string(b)}
-	if j, ok := parseJSON(string(b)); ok {
+	text := string(b)
+	// decode: the response body goes through a command (decrypt, verify…); json is then
+	// parsed from what it printed, and body stays the raw bytes as received
+	if dec, ok := a["decode"]; ok && len(b) > 0 {
+		argv, err := argvOf(dec, "http decode")
+		if err != nil {
+			return nil, err
+		}
+		plain, err := codec.Run(ctx, argv, baseDir, b)
+		if err != nil {
+			return nil, fmt.Errorf("http decode (status %d): %w", resp.StatusCode, err)
+		}
+		text = string(plain)
+		out["decoded"] = text
+	}
+	if j, ok := parseJSON(text); ok {
 		out["json"] = j
 	}
 	hs := map[string]any{}
@@ -569,4 +602,14 @@ func (ru *run) execLog(a map[string]any) (map[string]any, error) {
 		}
 	}
 	return map[string]any{"count": len(lines), "lines": lines}, nil
+}
+
+// argvOf reads a command given as an argv list (never a shell line: a payload runs through
+// it, so it must not be a place where values become shell syntax).
+func argvOf(v any, what string) ([]string, error) {
+	l, ok := v.([]any)
+	if !ok || len(l) == 0 {
+		return nil, fmt.Errorf("%s: give the command as a list, e.g. [\"./encrypt.sh\"]", what)
+	}
+	return strList(l), nil
 }

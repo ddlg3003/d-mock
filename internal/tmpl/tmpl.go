@@ -1,7 +1,7 @@
 // Package tmpl expands ${...} references in scenario and stack files.
 //
 // A reference is a dotted path into a nested map: ${run}, ${vars.order_id},
-// ${saved.loan.status}, ${env.HOME}, ${deps.redis.addr}. A reference that
+// ${saved.order.status}, ${env.HOME}, ${deps.redis.addr}. A reference that
 // cannot be resolved is an error: d-mock never substitutes a default value.
 package tmpl
 

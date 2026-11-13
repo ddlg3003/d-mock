@@ -14,7 +14,7 @@ deps:
     ready: { tcp: "localhost:16380", timeout: 30s }
 
 mocks:
-  partner: { spec: ../mocks/partner.yaml, port: 13002 }   # the parent suite's mock
+  decisions: { spec: ../mocks/decisions.yaml, port: 13002 }   # the parent suite's mock
 
 services:
   orders:                      # config: configs/orders.tmpl.yaml
@@ -29,4 +29,4 @@ services:
       env: { ORDERS_CONFIG: /config/orders.yaml }
       mounts: ["${services.orders.config}:/config/orders.yaml:ro"]
     ready: { http: "http://localhost:18081/healthz", timeout: 120s }
-    depends_on: [redis, partner]
+    depends_on: [redis, decisions]

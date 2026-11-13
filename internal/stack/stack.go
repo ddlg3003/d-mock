@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -261,15 +262,25 @@ func (r *Runner) upMock(ctx context.Context, st *State, name string, restart, dr
 	if err != nil {
 		return it, err
 	}
-	env, err := mock.Compile(name, m.Port, spec, filepath.Dir(specPath))
+	// with a codec, Mockoon moves to an inner port and a d-mock proxy takes the mock's port
+	prev := st.Mocks[name]
+	mockoonPort, inner := m.Port, 0
+	if spec.HasCodec() {
+		if prev != nil && prev.InnerPort > 0 {
+			inner = prev.InnerPort // same port, same compiled env: no needless restart
+		} else if inner, err = freePort(); err != nil {
+			return it, err
+		}
+		mockoonPort = inner
+	}
+	env, err := mock.Compile(name, mockoonPort, spec, filepath.Dir(specPath))
 	if err != nil {
 		return it, err
 	}
 	sum := sha256.Sum256(env)
 	hash := hex.EncodeToString(sum[:8])
 	envPath := filepath.Join(r.Dir, "mocks", name+".json")
-	prev := st.Mocks[name]
-	running := prev != nil && (ours(prev.PID, prev.PIDStart) || (prev.Container != "" && containerRunning(prev.Container)))
+	running := prev.running()
 	if running && !restart && prev.EnvHash == hash {
 		it.State = "already-running"
 		it.PID = prev.PID
@@ -294,7 +305,7 @@ func (r *Runner) upMock(ctx context.Context, st *State, name string, restart, dr
 	if err := os.WriteFile(envPath, env, 0o644); err != nil {
 		return it, err
 	}
-	ms := &MockState{Port: m.Port, Token: randomToken(), Env: envPath, EnvHash: hash, Log: r.logPath(name)}
+	ms := &MockState{Port: m.Port, Token: randomToken(), Env: envPath, EnvHash: hash, Log: r.logPath(name), InnerPort: inner}
 	switch r.Stack.Mockoon.Runner {
 	case "cli":
 		bin, err := exec.LookPath("mockoon-cli")
@@ -308,7 +319,7 @@ func (r *Runner) upMock(ctx context.Context, st *State, name string, restart, dr
 		ms.PID, ms.PIDStart = pid, procStart(pid)
 	case "docker":
 		cname, err := runContainer(r.Stack.Project, name, "mockoon/cli:"+r.Stack.Mockoon.Version,
-			[]string{fmt.Sprintf("%d:%d", m.Port, m.Port)}, nil,
+			[]string{fmt.Sprintf("%d:%d", mockoonPort, mockoonPort)}, nil,
 			[]string{filepath.Dir(envPath) + ":/data:ro"},
 			[]string{"-d", "/data/" + name + ".json", "--admin-api-token", ms.Token, "--max-transaction-logs", fmt.Sprint(mock.MaxCalls)})
 		if err != nil {
@@ -318,7 +329,21 @@ func (r *Runner) upMock(ctx context.Context, st *State, name string, restart, dr
 	}
 	st.Mocks[name] = ms
 	it.PID = ms.PID
+	if inner > 0 {
+		self, err := os.Executable()
+		if err != nil {
+			return it, err
+		}
+		pid, err := startProcess(r.Dir, []string{self, MockProxyCmd, fmt.Sprintf(":%d", m.Port), fmt.Sprintf("http://127.0.0.1:%d", inner), specPath}, nil, ms.Log)
+		if err != nil {
+			return it, fmt.Errorf("mock %s codec proxy: %w", name, err)
+		}
+		ms.ProxyPID, ms.ProxyStart = pid, procStart(pid)
+	}
 	isDead := func() bool {
+		if ms.ProxyPID > 0 && !alive(ms.ProxyPID) {
+			return true
+		}
 		if ms.PID > 0 {
 			return !alive(ms.PID)
 		}
@@ -378,11 +403,9 @@ func (r *Runner) upService(ctx context.Context, st *State, name string, restart,
 	if svc.Container != nil {
 		return r.upServiceContainer(ctx, st, name, svc, prev, ss, env, data, it, dry)
 	}
-	cmd := make([]string, len(svc.Cmd))
-	for i, a := range svc.Cmd {
-		if cmd[i], err = tmpl.Expand(a, data); err != nil {
-			return it, fmt.Errorf("service %s cmd: %w", name, err)
-		}
+	cmd, err := tmpl.ExpandArgv(svc.Cmd, data)
+	if err != nil {
+		return it, fmt.Errorf("service %s cmd: %w", name, err)
 	}
 	if dry {
 		it.State = "would-start"
@@ -449,13 +472,11 @@ func (r *Runner) upServiceContainer(ctx context.Context, st *State, name string,
 		}
 		opts.Mounts = append(opts.Mounts, v)
 	}
-	for _, a := range c.Args {
-		v, err := tmpl.Expand(a, data)
-		if err != nil {
-			return it, fmt.Errorf("service %s container.args: %w", name, err)
-		}
-		opts.Args = append(opts.Args, v)
+	cargs, err := tmpl.ExpandArgv(c.Args, data)
+	if err != nil {
+		return it, fmt.Errorf("service %s container.args: %w", name, err)
 	}
+	opts.Args = append(opts.Args, cargs...)
 	image := c.Image
 	if c.Build != nil {
 		image = containerName(r.Stack.Project, name) + ":dmock"
@@ -477,11 +498,9 @@ func (r *Runner) upServiceContainer(ctx context.Context, st *State, name string,
 	if c.Build != nil {
 		ctxDir := r.Stack.Path(c.Build.Context)
 		if len(c.Build.Pre) > 0 {
-			pre := make([]string, len(c.Build.Pre))
-			for i, a := range c.Build.Pre {
-				if pre[i], err = tmpl.Expand(a, data); err != nil {
-					return it, fmt.Errorf("service %s build.pre: %w", name, err)
-				}
+			pre, err := tmpl.ExpandArgv(c.Build.Pre, data)
+			if err != nil {
+				return it, fmt.Errorf("service %s build.pre: %w", name, err)
 			}
 			if err := runLogged(ctxDir, pre, ss.Log); err != nil {
 				it.State, it.Message = "error", err.Error()
@@ -594,6 +613,9 @@ func (r *Runner) serviceItem(name string, ss *ServiceState) Item {
 }
 
 func (r *Runner) stopMock(m *MockState) {
+	if m.ProxyPID > 0 {
+		stopProcess(m.ProxyPID, m.ProxyStart, 5*time.Second)
+	}
 	if m.PID > 0 {
 		stopProcess(m.PID, m.PIDStart, 5*time.Second)
 	}
@@ -697,7 +719,7 @@ func (r *Runner) Status() ([]Item, error) {
 	for _, n := range config.SortedKeys(r.Stack.Mocks) {
 		m := r.Stack.Mocks[n]
 		it := Item{Kind: "mock", Name: n, Port: m.Port, URL: fmt.Sprintf("http://localhost:%d", m.Port), State: "stopped", Log: r.logPath(n)}
-		if ms := st.Mocks[n]; ms != nil && (ours(ms.PID, ms.PIDStart) || (ms.Container != "" && containerRunning(ms.Container))) {
+		if ms := st.Mocks[n]; ms.running() {
 			it.State, it.PID = "running", ms.PID
 		}
 		items = append(items, it)
@@ -780,13 +802,9 @@ func waitMockReady(ctx context.Context, a *mock.Admin, logPath string, isDead fu
 // command fails the start, with its output in the error.
 func (r *Runner) afterReady(ctx context.Context, kind, name string, cmds []config.Command, data map[string]any) error {
 	for i, c := range cmds {
-		argv := make([]string, len(c))
-		for j, a := range c {
-			v, err := tmpl.Expand(a, data)
-			if err != nil {
-				return fmt.Errorf("%s %s after_ready[%d]: %w", kind, name, i, err)
-			}
-			argv[j] = v
+		argv, err := tmpl.ExpandArgv(c, data)
+		if err != nil {
+			return fmt.Errorf("%s %s after_ready[%d]: %w", kind, name, i, err)
 		}
 		if err := ctx.Err(); err != nil {
 			return err
@@ -796,4 +814,17 @@ func (r *Runner) afterReady(ctx context.Context, kind, name string, cmds []confi
 		}
 	}
 	return nil
+}
+
+// MockProxyCmd is the hidden dmock command that runs a mock's codec proxy.
+const MockProxyCmd = "__mock-proxy"
+
+// freePort asks the OS for a free local port (for Mockoon behind a codec proxy).
+func freePort() (int, error) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port, nil
 }

@@ -25,7 +25,7 @@ project: __NAME__
 
 # mocks: the third-party APIs your service calls. The spec is mocks/<name>.yaml.
 mocks:
-  partner: { port: 14000 }
+  example-api: { port: 14000 }
 
 # services: the code under test. Its config template is configs/<name>.tmpl.yaml.
 # services:
@@ -34,7 +34,7 @@ mocks:
 #     cmd: ["go", "run", "./cmd/app"]
 #     env: { APP_CONFIG: "${services.app.config}" }
 #     ready: { http: "http://localhost:8080/healthz", timeout: 90s }
-#     depends_on: [partner]
+#     depends_on: [example-api]
 
 # hooks: steps run around the scenarios (same syntax as scenario steps). See `dmock help spec`.
 # hooks:

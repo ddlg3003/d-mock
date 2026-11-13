@@ -1,6 +1,6 @@
 // Toy "orders" service for the d-mock example. It has the shape d-mock was built to test:
-// an order waits for a partner decision that arrives either by callback (signal path) or by
-// polling the partner API (poll path), and is cancelled at the partner when neither comes
+// an order waits for a decision from an external API, by callback (signal path) or by
+// polling that API (poll path), and is cancelled at the decision API when neither comes
 // in time (timeout path). State lives in Redis.
 package main
 
@@ -23,7 +23,7 @@ import (
 type Config struct {
 	Listen          string        `yaml:"listen"`
 	RedisAddr       string        `yaml:"redis_addr"`
-	PartnerURL      string        `yaml:"partner_url"`
+	DecisionsURL    string        `yaml:"decisions_url"`
 	PollDelay       time.Duration `yaml:"poll_delay"`
 	PollEvery       time.Duration `yaml:"poll_every"`
 	ApprovalTimeout time.Duration `yaml:"approval_timeout"`
@@ -63,7 +63,7 @@ func main() {
 	mux.HandleFunc("GET /orders/{id}", s.get)
 	mux.HandleFunc("POST /callback", s.callback)
 	mux.HandleFunc("POST /debug/alloc", allocate)
-	log.Printf("orders listening on %s (partner %s)", cfg.Listen, cfg.PartnerURL)
+	log.Printf("orders listening on %s (decision API %s)", cfg.Listen, cfg.DecisionsURL)
 	log.Fatal(http.ListenAndServe(cfg.Listen, mux))
 }
 
@@ -124,7 +124,7 @@ func (s *server) get(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(o)
 }
 
-// callback is the partner pushing its decision.
+// callback is the decision API pushing its decision.
 func (s *server) callback(w http.ResponseWriter, r *http.Request) {
 	var in struct{ ID, Status string }
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
@@ -147,7 +147,7 @@ func (s *server) callback(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{"applied": applied})
 }
 
-// awaitDecision: signal first; after poll_delay poll the partner until approval_timeout.
+// awaitDecision: signal first; after poll_delay poll the decision API until approval_timeout.
 func (s *server) awaitDecision(id string, sig chan struct{}) {
 	defer func() {
 		s.mu.Lock()
@@ -167,31 +167,31 @@ func (s *server) awaitDecision(id string, sig chan struct{}) {
 			return
 		default:
 		}
-		status, err := s.pollPartner(id)
+		status, err := s.pollDecision(id)
 		if err != nil {
-			log.Printf("order=%s partner error: %v", id, err)
+			log.Printf("order=%s decision API error: %v", id, err)
 		} else if status == "APPROVED" || status == "REJECTED" {
 			applied, _ := s.decide(id, status, "poll")
 			log.Printf("order=%s polled status=%s applied=%v", id, status, applied)
 			return
 		} else {
-			log.Printf("order=%s partner still %s", id, status)
+			log.Printf("order=%s decision API still %s", id, status)
 		}
 		time.Sleep(s.cfg.PollEvery)
 	}
 	if applied, _ := s.decide(id, "CANCELLED", "timeout"); applied {
-		log.Printf("order=%s approval timeout, cancelling at partner", id)
-		resp, err := s.http.Post(s.cfg.PartnerURL+"/orders/"+id+"/cancel", "application/json", nil)
+		log.Printf("order=%s approval timeout, cancelling at the decision API", id)
+		resp, err := s.http.Post(s.cfg.DecisionsURL+"/orders/"+id+"/cancel", "application/json", nil)
 		if err != nil {
-			log.Printf("order=%s partner cancel failed: %v", id, err)
+			log.Printf("order=%s decision API cancel failed: %v", id, err)
 			return
 		}
 		resp.Body.Close()
 	}
 }
 
-func (s *server) pollPartner(id string) (string, error) {
-	resp, err := s.http.Get(s.cfg.PartnerURL + "/orders/" + id)
+func (s *server) pollDecision(id string) (string, error) {
+	resp, err := s.http.Get(s.cfg.DecisionsURL + "/orders/" + id)
 	if err != nil {
 		return "", err
 	}

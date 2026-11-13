@@ -52,7 +52,7 @@ func TestConventions(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "dmock.yaml"), `project: x
 mocks:
-  partner: { port: 14000 }
+  fake-api: { port: 14000 }
   other: { spec: elsewhere/o.yaml, port: 14001 }
 services:
   app: { cmd: [true] }
@@ -64,8 +64,8 @@ services:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Mocks["partner"].Spec != filepath.Join("mocks", "partner.yaml") || s.Mocks["other"].Spec != "elsewhere/o.yaml" {
-		t.Errorf("mock specs: %+v %+v", s.Mocks["partner"], s.Mocks["other"])
+	if s.Mocks["fake-api"].Spec != filepath.Join("mocks", "fake-api.yaml") || s.Mocks["other"].Spec != "elsewhere/o.yaml" {
+		t.Errorf("mock specs: %+v %+v", s.Mocks["fake-api"], s.Mocks["other"])
 	}
 	if s.Services["app"].Config == nil || s.Services["app"].Config.Template != filepath.Join("configs", "app.tmpl.yaml") {
 		t.Errorf("app config: %+v", s.Services["app"].Config)
@@ -118,5 +118,16 @@ mocks:
 `)
 	if _, err := Load(filepath.Join(dir, "dmock.yaml"), nil); err != nil {
 		t.Errorf("a remote dep publishes nothing, so no clash: %v", err)
+	}
+}
+
+func TestWarnsOnMockoonAsService(t *testing.T) {
+	s := &Stack{Services: map[string]*Service{
+		"fake-api": {Cmd: []string{"mockoon-cli", "start", "-d", "env.json"}},
+		"app":      {Cmd: []string{"go", "run", "."}},
+	}}
+	w := s.Warnings()
+	if len(w) != 1 || !strings.Contains(w[0], "service fake-api runs Mockoon") {
+		t.Errorf("warnings = %v", w)
 	}
 }

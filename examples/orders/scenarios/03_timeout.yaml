@@ -1,23 +1,23 @@
-name: timeout — partner never decides, order cancelled at the partner
+name: timeout — the decision API never decides, order cancelled at the decision API
 vars:
   order: "ord-${run}-3"
   api: "http://localhost:18080"
 
 steps:
-  - name: create order (partner stays PENDING, its default state)
+  - name: create order (the decision API stays PENDING, its default state)
     http: { method: POST, url: "${vars.api}/orders", json: { id: "${vars.order}" } }
     expect: { status: 201 }
 
-  - name: late polls time out at the partner
-    mock: { name: partner, fault: { key: "${vars.order}", fault: timeout } }
+  - name: late polls time out at the decision API
+    mock: { name: decisions, fault: { key: "${vars.order}", fault: timeout } }
 
   - name: order cancelled after the 8s approval timeout
     http: { url: "${vars.api}/orders/${vars.order}" }
     retry: { timeout: 20s, every: 1s }
     expect: { json.status: CANCELLED, json.decided_by: timeout }
 
-  - name: cancel sent to the partner exactly once
-    mock: { name: partner, calls: { route: cancel, key: "${vars.order}" } }
+  - name: cancel sent to the decision API exactly once
+    mock: { name: decisions, calls: { route: cancel, key: "${vars.order}" } }
     retry: { timeout: 5s, every: 500ms }
     expect: { count: 1, calls.0.method: POST }
 

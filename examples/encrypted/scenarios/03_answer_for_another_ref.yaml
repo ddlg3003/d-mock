@@ -1,0 +1,20 @@
+name: an answer about another ref — the service refuses to act on it
+vars:
+  ref: "ref-${run}"
+  api: "http://localhost:18095"
+
+steps:
+  - name: the API answers about someone else's ref (valid encryption, wrong content)
+    mock: { name: secure-api, set: { key: "${vars.ref}", state: { answer_for: other } } }
+
+  - name: ask
+    http: { method: POST, url: "${vars.api}/requests", json: { ref: "${vars.ref}" } }
+    expect: { status: 502, json.error: { match: "ref mismatch" } }
+
+  - name: nothing was approved
+    http: { url: "${vars.api}/requests/${vars.ref}" }
+    expect: { json.status: ERROR }
+
+  - name: the reason is in the log
+    log: { service: app, grep: "ref=${vars.ref} error: response ref mismatch" }
+    expect: { count: 1 }

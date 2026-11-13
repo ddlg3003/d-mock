@@ -8,7 +8,7 @@ steps:
     http: { method: POST, url: "${vars.api}/orders", json: { id: "${vars.order}" } }
     expect: { status: 201, json.status: WAITING }
 
-  - name: partner calls back APPROVED (before the 3s poll delay)
+  - name: decisions calls back APPROVED (before the 3s poll delay)
     http: { method: POST, url: "${vars.api}/callback", json: { id: "${vars.order}", status: APPROVED } }
     expect: { status: 200, json.applied: true }
 
@@ -19,8 +19,8 @@ steps:
   - name: wait past the poll delay
     sleep: 4s
 
-  - name: the partner was never polled
-    mock: { name: partner, calls: { route: status, key: "${vars.order}" } }
+  - name: the decision API was never polled
+    mock: { name: decisions, calls: { route: status, key: "${vars.order}" } }
     expect: { count: 0 }
 
   - name: the service logged the signal path

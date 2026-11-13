@@ -49,7 +49,7 @@ func writeSpec(t *testing.T) (*Spec, string) {
 
 func TestCompileShape(t *testing.T) {
 	s, dir := writeSpec(t)
-	b, err := Compile("partner", 3999, s, dir)
+	b, err := Compile("orders-api", 3999, s, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestCompileShape(t *testing.T) {
 		t.Fatalf("want 3 responses, got %d", len(status))
 	}
 	def := status[2].(map[string]any)
-	if !strings.Contains(def["body"].(string), "{{{getGlobalVar (concat 'partner|status|' (urlParam 'id'))}}}") {
+	if !strings.Contains(def["body"].(string), "{{{getGlobalVar (concat 'orders-api|status|' (urlParam 'id'))}}}") {
 		t.Fatalf("default body not raw state lookup: %s", def["body"])
 	}
 	blob := routes[1].(map[string]any)["responses"].([]any)[0].(map[string]any)
@@ -87,7 +87,7 @@ func TestMockoonLive(t *testing.T) {
 	}
 	s, dir := writeSpec(t)
 	port := freePort(t)
-	b, _ := Compile("partner", port, s, dir)
+	b, _ := Compile("orders-api", port, s, dir)
 	envPath := filepath.Join(dir, "env.json")
 	os.WriteFile(envPath, b, 0o644)
 	cmd := exec.Command(bin, "start", "-d", envPath, "--admin-api-token", "tok", "-X")
@@ -98,7 +98,7 @@ func TestMockoonLive(t *testing.T) {
 	base := fmt.Sprintf("http://localhost:%d", port)
 	waitHTTP(t, base+"/blob")
 
-	a := NewAdmin("partner", port, "tok")
+	a := NewAdmin("orders-api", port, "tok")
 	get := func(p string) (int, string) {
 		r, err := http.Get(base + p)
 		if err != nil {

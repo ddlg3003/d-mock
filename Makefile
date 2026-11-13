@@ -12,6 +12,7 @@ e2e: build
 
 e2e-checkout: build
 	bin/dmock test examples/checkout
+	bin/dmock test examples/encrypted
 
 # containers + load (needs docker/podman and k6)
 e2e-containers: build

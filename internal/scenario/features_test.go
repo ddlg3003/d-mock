@@ -25,9 +25,9 @@ func TestMatrixAndRepeatExpand(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "s.yaml")
 	writeYAML(t, p, `name: callback
 matrix:
-  partner: [CAKE, TNEX]
+  region: [EU, US]
   case:
-    - { callback: APPROVED, want: DISBURSED }
+    - { callback: APPROVED, want: DONE }
     - { callback: REJECTED, want: CANCELLED }
 repeat: 2
 steps:
@@ -42,13 +42,13 @@ steps:
 		t.Fatal(err)
 	}
 	if len(runs) != 8 {
-		t.Fatalf("2 partners × 2 cases × repeat 2 = 8 runs, got %d", len(runs))
+		t.Fatalf("2 regions × 2 cases × repeat 2 = 8 runs, got %d", len(runs))
 	}
-	if runs[0].Name != "callback [partner=CAKE case={callback:APPROVED want:DISBURSED}] #1" {
+	if runs[0].Name != "callback [region=EU case={callback:APPROVED want:DONE}] #1" {
 		t.Errorf("first name = %q", runs[0].Name)
 	}
 	last := runs[7]
-	if last.MatrixValues["partner"] != "TNEX" || last.Iteration != 2 || last.MatrixValues["case"].(map[string]any)["want"] != "CANCELLED" {
+	if last.MatrixValues["region"] != "US" || last.Iteration != 2 || last.MatrixValues["case"].(map[string]any)["want"] != "CANCELLED" {
 		t.Errorf("last run = %+v %d", last.MatrixValues, last.Iteration)
 	}
 	// no matrix, no repeat: one run with the plain name

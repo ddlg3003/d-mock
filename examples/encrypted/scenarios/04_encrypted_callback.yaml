@@ -1,0 +1,32 @@
+name: encrypted callback — a valid one changes the status, a forged one is refused
+vars:
+  ref: "ref-${run}"
+  api: "http://localhost:18095"
+
+steps:
+  - name: the API first says PENDING
+    mock: { name: secure-api, set: { key: "${vars.ref}", state: { status: PENDING } } }
+
+  - name: ask
+    http: { method: POST, url: "${vars.api}/requests", json: { ref: "${vars.ref}" } }
+    expect: { json.status: PENDING }
+
+  - name: a forged callback (not encrypted with our key) is refused
+    http: { method: POST, url: "${vars.api}/callbacks", body: '{"ref":"${vars.ref}","status":"APPROVED"}' }
+    expect: { status: 400 }
+
+  - name: the real callback arrives, encrypted, built for this run
+    http:
+      method: POST
+      url: "${vars.api}/callbacks"
+      json: { ref: "${vars.ref}", status: APPROVED }
+      encode: ["./codec/encrypt.sh"]
+    expect: { status: 200 }
+
+  - name: approved by the callback, not by the forged one
+    http: { url: "${vars.api}/requests/${vars.ref}" }
+    expect: { json.status: APPROVED }
+
+  - name: the forged one is in the log
+    log: { service: app, grep: "callback rejected" }
+    expect: { count: 1 }

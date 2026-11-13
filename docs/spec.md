@@ -6,10 +6,10 @@ hooks and steps. Print it with `dmock help spec`. How to work with it day to day
 
 - [Suite layout](#suite-layout)
 - [dmock.yaml](#dmockyaml): [deps](#deps), [mocks](#mocks), [services](#services), [hooks](#hooks), [references](#references-)
-- [Mock spec](#mock-spec-mocksnameyaml)
+- [Mock spec](#mock-spec-mocksnameyaml): [encoded or encrypted payloads](#encoded-or-encrypted-payloads)
 - [Scenario file](#scenario-file): [matrix and repeat](#matrix-and-repeat), [include](#include), [common step fields](#common-step-fields), [expect](#expect)
 - Steps: [http](#http) · [sql](#sql) · [mock](#mock) · [log](#log) · [exec](#exec) · [kafka](#kafka) · [temporal](#temporal) · [service](#service) · [stack](#stack) · [parallel](#parallel) · [k6](#k6) · [sleep](#sleep)
-- [Safety and cleanup](#safety-and-cleanup)
+- [Shell lines and references](#shell-lines-and-references) · [Lint warnings](#lint-warnings) · [Safety and cleanup](#safety-and-cleanup)
 
 ## Suite layout
 
@@ -41,7 +41,7 @@ folders), a file.
 **Conventions.** `mocks.<name>.spec` defaults to `mocks/<name>.yaml`. A service's
 `config.template` defaults to `configs/<service>.tmpl.<ext>` when exactly one such file exists.
 Write either explicitly only when the file lives elsewhere (e.g. a nested suite reusing
-`../mocks/partner.yaml`).
+`../mocks/payments.yaml`).
 
 **Nested suites** hold a variant of the stack (e.g. the service in a container with pod limits).
 Each has its own `.dmock/`; give it its own ports and it runs next to its parent.
@@ -119,6 +119,7 @@ A **command** (in `after_ready`) is a shell line (`- go run ./migrate "${deps.db
 `sh -c`) or an argv list (`- ["go", "run", "./migrate"]`). It runs from the suite folder, may use
 [references](#references-), and its output goes to the dep's or service's log
 (`.dmock/logs/<name>.log`). A non-zero exit fails `up` with the last lines of output.
+In a shell line each reference becomes exactly one quoted word (see [Shell lines](#shell-lines-and-references)).
 
 ### mocks
 
@@ -225,12 +226,49 @@ routes:
 |---|---|
 | `id` | route id, used by `calls` and errors |
 | `method`, `path` | what to match |
-| `key` | a Mockoon helper choosing the state key: `urlParam 'x'`, `bodyRaw 'x'`, `queryParam 'x'`, `header 'x'`; without it, state is keyed `-` |
+| `key` | a Mockoon helper choosing the state key: `urlParam 'x'`, `bodyRaw 'x'`, `queryParam 'x'`, `header 'x'`; without it, every request shares the state key `-`. `bodyRaw` can't read an encoded or encrypted body: add a `codec` with `decode`, or key on a readable part; with no readable id, omit `key` and run the scenarios that use this mock one at a time |
 | `state` | declared state fields and their defaults; `mock set` refuses undeclared fields |
 | `status`, `headers`, `body` / `body_file`, `latency` | the default answer; `${key}` and `${state.<field>}` are filled in raw (not HTML-escaped) |
-| `encode` | a command that transforms `body_file` at compile time (signing, encryption); served with templating off |
+| `encode` | an argv command that transforms `body_file` **once, when the mock starts** (signing, encryption); served byte for byte with templating off. For an answer that depends on the request, use `codec` |
 | `variants[]` | `when: {field: value}` plus `status`, `headers`, `body`/`body_file`, `encode`, `latency` |
 | `faults.<name>` | `status`, `body`, `latency`; served to a key while switched on (`times` N, or until cleared) |
+| `codec` | this route's own codec, replacing the spec's (`codec: {}` = none, e.g. a plain health route) |
+
+### Encoded or encrypted payloads
+
+Two ways, depending on whether the answer must depend on the request:
+
+| Need | Use | Runs |
+|---|---|---|
+| a fixed answer per state (status-only replies, error bodies) | route `body_file` + `encode`, a `variants` entry per state | once, when the mock starts |
+| an answer that echoes the request (its id, a signature over its nonce, a fresh timestamp), or a request body you need to read (`key`, `calls`) | `codec` | per request |
+
+```yaml
+codec:                                  # top level of the spec: every route (a route's codec replaces it)
+  decode: ["../codec/decrypt.sh"]       # request body in → plain text out, before Mockoon sees it
+  encode: ["../codec/encrypt.sh"]       # each templated response body in → what is sent back
+routes:
+  - id: inquiry
+    method: POST
+    path: inquiry
+    key: "bodyRaw 'ref'"                # reads the decoded body
+    state: { status: APPROVED }
+    body: '{"ref":"${key}","status":"${state.status}"}'   # echoes the request, then encrypted
+```
+
+With a codec, Mockoon moves to an internal port and a small d-mock proxy listens on the mock's
+port: it decodes each request body, forwards it to Mockoon, and encodes the response body.
+Everything else stays as without a codec: state, variants, faults (a fault's body is encoded
+too), latency, the admin API, and `mock calls`, which records the **decoded** request (so
+`calls.0.json.ref` works). When the decoded body is JSON, Mockoon receives it as
+`application/json` and the original content type is kept in the header
+`x-dmock-encoded-content-type`.
+
+Codec commands are argv lists (no shell), run from the spec's folder, the payload on stdin and
+the result on stdout, with a 10 s timeout and a 16 MiB limit. A request that fails to decode is
+answered `400` without reaching Mockoon (and isn't recorded); a response that fails to encode
+is answered `502`; both are logged in the mock's log with the command's error. A route can't
+have both a codec `encode` and a static `encode`.
 
 Mockoon helpers (`{{now}}`, `{{faker 'person.firstName'}}`) work in bodies. A mock keeps its
 last 1000 requests for `calls`.
@@ -273,12 +311,12 @@ in file order; a list item may be a map, read with dotted paths.
 
 ```yaml
 matrix:
-  partner: [CAKE, TNEX]
+  region: [EU, US]
   case:
-    - { callback: APPROVED, want: DISBURSED }
+    - { callback: APPROVED, want: DONE }
     - { callback: REJECTED, want: CANCELLED }
-# 4 runs: [partner=CAKE case={callback:APPROVED want:DISBURSED}], …
-# in steps: ${matrix.partner}, ${matrix.case.callback}, ${matrix.case.want}
+# 4 runs: [region=EU case={callback:APPROVED want:DONE}], …
+# in steps: ${matrix.region}, ${matrix.case.callback}, ${matrix.case.want}
 ```
 
 `repeat: N` runs every case N times (`#1`, `#2`, … in the name, `${iteration}` = 1..N), each with
@@ -317,6 +355,10 @@ A step has exactly one action key (`http`, `sql`, …, or `include`), plus:
 | `save` | `{name: result.path}`: keep a value as `${saved.name}` for later steps |
 | `after` | only on a `parallel` branch: wait this long after the common start |
 
+`after`, `retry.timeout` and `retry.every` are fixed durations (`200ms`, `30s`): they are read
+before references are filled in, so `${...}` there is a lint error. Use a `sleep` step (it takes
+references) to vary timing per matrix case.
+
 `--dry-run` expands each step without running it; a value a step would save shows as `<saved.name>`.
 
 ### expect
@@ -350,13 +392,25 @@ Call an API (your service, or a mock directly).
 | `headers` | map |
 | `json` | a value sent as JSON (sets `Content-Type`) |
 | `body` | raw body text (instead of `json`) |
+| `encode` | argv command: the request body (references filled in) goes in on stdin, its stdout is sent |
+| `decode` | argv command: the response body goes in, its stdout is parsed for `json` |
 | `timeout` | default `30s` |
 
-**Result:** `status`, `body`, `json` (when the body is JSON), `headers`.
+**Result:** `status`, `body` (raw, as received), `json` (when the body, or the decoded body, is
+JSON), `decoded` (with `decode`), `headers`.
 
 ```yaml
 - http: { method: POST, url: "${vars.api}/orders", json: { id: "${vars.order}", amount: 1500 } }
   expect: { status: 201, json.id: "${vars.order}" }
+
+- name: an encrypted callback, built for this run
+  http:
+    method: POST
+    url: "${vars.api}/callbacks"
+    json: { ref: "${vars.ref}", status: APPROVED }
+    encode: ["./codec/encrypt.sh"]
+    decode: ["./codec/decrypt.sh"]     # only if the answer is encrypted too
+  expect: { status: 200 }
 ```
 
 ### sql
@@ -430,7 +484,8 @@ Run a command from the suite folder.
 **Result:** `exit`, `stdout`, `stderr` (raw, with the trailing newline), `json` (when stdout is JSON).
 
 An `exec` step passes whatever its exit code unless you `expect: { exit: 0 }`. Saving `stdout`
-keeps the newline: print without one (`printf`) or print JSON and save `json.x`.
+keeps the newline: print without one (`printf`) or print JSON and save `json.x`. In a shell line,
+each reference is one quoted word (see [Shell lines](#shell-lines-and-references)).
 
 ```yaml
 - exec: { cmd: "./seed.sh ${vars.order}" }
@@ -570,7 +625,7 @@ Each branch is a normal step (with its own `expect`, `retry`, `save`); branches 
         http: { method: POST, url: "${vars.api}/jobs/poll" }
       - name: callback
         after: 200ms
-        http: { method: POST, url: "${vars.api}/callbacks/partner", json: { id: "${vars.order}", status: APPROVED } }
+        http: { method: POST, url: "${vars.api}/callbacks", json: { id: "${vars.order}", status: APPROVED } }
 ```
 
 ### k6
@@ -603,6 +658,29 @@ unless `--allow-remote-load`.
 ```
 
 Prefer `retry` on a check; sleep only to prove that something does **not** happen.
+
+## Shell lines and references
+
+Suite files are code: they run commands. Values are data: in a line a shell reads (an `exec`
+`cmd` string, a string `after_ready` command, the script of any `sh -c` / `bash -c` argv), every
+`${...}` becomes exactly **one literal word**, quoted for where it sits:
+
+| In the line | `${saved.x}` = `a&b; c $(d)` becomes |
+|---|---|
+| `echo ${saved.x}` | `echo 'a&b; c $(d)'` |
+| `echo "id=${saved.x}"` | `echo "id=a&b; c \$(d)"` |
+| `echo 'id=${saved.x}'` | `echo 'id=a&b; c $(d)'` |
+
+So a DSN with `&` stays one argument, and an answer from the system under test can never run
+as a command. A reference can't add flags or shell syntax to a line: write those in the line, or
+use an argv list. Argv lists (service `cmd`, `build.pre`, `encode`, `decode`, `codec`) never go
+through a shell.
+
+## Lint warnings
+
+`dmock lint` also prints warnings that don't fail it: a service whose `cmd` (or image) runs
+Mockoon itself has no `mock set/fault/calls`, per-key state or cleanup, so it should be a mock
+under `mocks:` (with `body_file` + `encode` or a `codec` for encoded payloads).
 
 ## Safety and cleanup
 

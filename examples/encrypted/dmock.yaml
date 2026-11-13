@@ -1,0 +1,14 @@
+# Use case: a service talks to a third-party API whose payloads are encrypted.
+#   dmock test .            (up, run scenarios/, down)
+project: encrypted
+
+mocks:
+  secure-api: { port: 15001 }        # spec: mocks/secure-api.yaml (with a codec)
+
+services:
+  app:                               # the code under test; config: configs/app.tmpl.yaml
+    dir: service
+    cmd: ["go", "run", "."]
+    env: { APP_CONFIG: "${services.app.config}" }
+    ready: { http: "http://localhost:18095/healthz", timeout: 120s }
+    depends_on: [secure-api]

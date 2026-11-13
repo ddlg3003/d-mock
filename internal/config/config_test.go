@@ -16,10 +16,10 @@ deps:
     remote: { vars: { dsn: "x" } }
     container: { image: mysql:8, vars: { dsn: "y" } }
 mocks:
-  partner: { spec: m.yaml, port: 3001 }
+  fake-api: { spec: m.yaml, port: 3001 }
 services:
   api: { cmd: [api], depends_on: [db, worker] }
-  worker: { cmd: [worker], depends_on: [partner] }
+  worker: { cmd: [worker], depends_on: [fake-api] }
 `
 
 func write(t *testing.T, body string) string {

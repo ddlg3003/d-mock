@@ -34,6 +34,19 @@ type MockState struct {
 	PIDStart  string `json:"pid_start,omitempty"` // process start time, guards against PID reuse
 	Container string `json:"container,omitempty"`
 	Log       string `json:"log"`
+	// with a codec, Mockoon listens on InnerPort and a d-mock proxy (ProxyPID) on Port
+	InnerPort  int    `json:"inner_port,omitempty"`
+	ProxyPID   int    `json:"proxy_pid,omitempty"`
+	ProxyStart string `json:"proxy_start,omitempty"`
+}
+
+// running: Mockoon is up, and so is its codec proxy when it has one.
+func (m *MockState) running() bool {
+	if m == nil {
+		return false
+	}
+	up := ours(m.PID, m.PIDStart) || (m.Container != "" && containerRunning(m.Container))
+	return up && (m.ProxyPID == 0 || ours(m.ProxyPID, m.ProxyStart))
 }
 
 type ServiceState struct {

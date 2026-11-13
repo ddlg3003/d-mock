@@ -1,0 +1,21 @@
+# A third-party API whose request and response bodies are encrypted.
+# The codec runs per request: d-mock decrypts the request before Mockoon sees it (so `key`,
+# state and recorded calls work on plain JSON), and encrypts each response after templating
+# (so the answer can echo the request's ref, as a real API would).
+codec:
+  decode: ["../codec/decrypt.sh"]          # paths are relative to this file
+  encode: ["../codec/encrypt.sh"]
+
+routes:
+  - id: inquiry
+    method: POST
+    path: inquiry
+    key: "bodyRaw 'ref'"                   # read from the decrypted body
+    state: { status: APPROVED, answer_for: same }
+    headers: { Content-Type: text/plain }
+    body: '{"ref":"${key}","status":"${state.status}"}'
+    variants:
+      - when: { answer_for: other }        # a reply about someone else's ref
+        body: '{"ref":"other-${key}","status":"${state.status}"}'
+    faults:
+      http500: { status: 500, body: '{"error":"down"}' }

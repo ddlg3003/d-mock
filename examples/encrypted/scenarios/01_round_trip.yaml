@@ -1,0 +1,27 @@
+name: encrypted round trip — the API's answer is decrypted, checked and kept
+vars:
+  ref: "ref-${run}"
+  api: "http://localhost:18095"
+
+steps:
+  - name: ask the API about a ref
+    http: { method: POST, url: "${vars.api}/requests", json: { ref: "${vars.ref}" } }
+    expect: { status: 200, json.status: APPROVED }
+
+  - name: the API received this ref (d-mock decrypted the request for us)
+    mock: { name: secure-api, calls: { route: inquiry, key: "${vars.ref}" } }
+    expect:
+      count: 1
+      calls.0.json.ref: "${vars.ref}"
+      calls.0.headers.x-dmock-encoded-content-type: text/plain   # the service really sent ciphertext
+
+  - name: talk to the API like the service does, encrypted both ways
+    http:
+      method: POST
+      url: "${mocks.secure-api.url}/inquiry"
+      json: { ref: "${vars.ref}" }
+      encode: ["./codec/encrypt.sh"]       # request body encrypted before sending
+      decode: ["./codec/decrypt.sh"]       # response decrypted; json comes from the result
+    expect:
+      body: { match: "^U2FsdGVk" }        # what came back is ciphertext…
+      json.ref: "${vars.ref}"              # …about our ref

@@ -1,5 +1,5 @@
-# The partner API the toy service polls and cancels at.
-# Per-order state: `dmock mock set partner <order-id> status=APPROVED`.
+# The decision API the toy service polls and cancels at.
+# Per-order state: `dmock mock set decisions <order-id> status=APPROVED`.
 routes:
   - id: status
     method: GET
@@ -9,7 +9,7 @@ routes:
     headers: { Content-Type: application/json }
     body: '{"id":"${key}","status":"${state.status}"}'
     faults:
-      http500: { status: 500, body: '{"error":"partner down"}' }
+      http500: { status: 500, body: '{"error":"API down"}' }
       timeout: { latency: 5s }   # longer than the toy's 3s client timeout
 
   - id: cancel

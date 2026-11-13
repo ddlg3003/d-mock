@@ -107,6 +107,7 @@ The DB alone would say "PAID" even with the double-charge bug; the recorded mock
 | Callback races the poll: which one wins? | `parallel` the poll and the callback (`after: 200ms` on one to force the order); expect the decision recorded once |
 | Async event consumed? | `kafka` a message, then `sql` / `http` with `retry` until the effect shows |
 | Event published? | `kafka: { consume: { topic, key } }` with `retry`; expect `count: 1` |
+| Encrypted answer tampered or about another id: do we refuse it? | a `codec` mock with a `variants` entry for the bad answer; expect the rejection and no state change |
 | Workflow timer cancelled by a signal? | `temporal: { action: signal }`, then `temporal: { action: history }` expect `events: { contains: TimerCanceled }` |
 | Nothing should happen | `sleep` past the deadline, then expect `count: 0` calls |
 
@@ -151,7 +152,7 @@ Different steps side by side, one delayed to force an interleaving:
         http: { method: POST, url: "${vars.api}/jobs/poll-now" }
       - name: callback
         after: 200ms
-        http: { method: POST, url: "${vars.api}/callbacks/partner", json: { id: "${vars.order}", status: APPROVED } }
+        http: { method: POST, url: "${vars.api}/callbacks", json: { id: "${vars.order}", status: APPROVED } }
 ```
 
 ## Question: what happens when the database goes down?
@@ -174,7 +175,7 @@ steps:
 ```
 
 The same shape answers "does the worker resume after a crash?" (`stack: { kill: worker }`, then
-`start`) and "does it survive the partner restarting?" (`stack: { restart: payments }`). Whatever
+`start`) and "does it survive the third-party API restarting?" (`stack: { restart: payments }`). Whatever
 a scenario leaves down is started again after the run.
 
 ## Question: is the event published?
@@ -243,8 +244,64 @@ steps:
     expect: { rows.0.status: "${matrix.case.order}" }
 ```
 
-Several keys combine (`partner: [A, B]` × 3 cases = 6 runs). Each run is reported (and in JUnit)
-as `name [partner=A case={…}]`.
+Several keys combine (`region: [EU, US]` × 3 cases = 6 runs). Each run is reported (and in JUnit)
+as `name [region=EU case={…}]`.
+
+## Question: the API's payloads are encrypted — does our service check what it decrypts?
+
+Keep it a d-mock mock (never a raw Mockoon environment or a hand-written fake): a `codec`
+decrypts each request before Mockoon sees it and encrypts each answer after templating, so the
+answer can echo the request, and `key`, state, faults and `mock calls` all work on plain JSON.
+Runnable: `examples/encrypted`.
+
+```yaml
+# mocks/secure-api.yaml
+codec:
+  decode: ["../codec/decrypt.sh"]        # your real tool: gpg, openssl, your SDK's CLI
+  encode: ["../codec/encrypt.sh"]
+routes:
+  - id: inquiry
+    method: POST
+    path: inquiry
+    key: "bodyRaw 'ref'"                 # from the decrypted body
+    state: { status: APPROVED, answer_for: same }
+    body: '{"ref":"${key}","status":"${state.status}"}'
+    variants:
+      - when: { answer_for: other }      # valid encryption, about someone else's ref
+        body: '{"ref":"other-${key}","status":"${state.status}"}'
+```
+
+```yaml
+name: an answer about another ref — the service refuses to act on it
+steps:
+  - mock: { name: secure-api, set: { key: "${vars.ref}", state: { answer_for: other } } }
+  - http: { method: POST, url: "${vars.api}/requests", json: { ref: "${vars.ref}" } }
+    expect: { status: 502, json.error: { match: "ref mismatch" } }
+  - name: the API got our ref (decrypted for the assertion)
+    mock: { name: secure-api, calls: { route: inquiry, key: "${vars.ref}" } }
+    expect: { count: 1, calls.0.json.ref: "${vars.ref}" }
+```
+
+The other direction, an encrypted callback built for this run, and a forged one:
+
+```yaml
+- name: a forged callback (not encrypted with our key) is refused
+  http: { method: POST, url: "${vars.api}/callbacks", body: '{"ref":"${vars.ref}","status":"APPROVED"}' }
+  expect: { status: 400 }
+- name: the real callback
+  http:
+    method: POST
+    url: "${vars.api}/callbacks"
+    json: { ref: "${vars.ref}", status: APPROVED }
+    encode: ["./codec/encrypt.sh"]
+  expect: { status: 200 }
+```
+
+When does the answer need the codec (per request) rather than a fixed `body_file` + `encode`
+per state? When **your service checks the decrypted answer against its request**: the echoed
+id, a signature over its nonce or body, a timestamp window. A fixed fixture fails those checks
+on every request, so nothing after them can be tested. If your service only reads a status,
+fixed fixtures are enough.
 
 ## Shared setup: migrations, hooks, includes
 

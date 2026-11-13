@@ -1,4 +1,4 @@
-# A fake third-party API. Each request is keyed by the partner's entity id, so every test
+# A fake third-party API. Each request is keyed by the id of the entity it is about, so every test
 # entity gets its own answer (`mock set`) and its own failures (`mock fault`).
 routes:
   - id: get-order
@@ -9,5 +9,5 @@ routes:
     headers: { Content-Type: application/json }
     body: '{"id":"${key}","status":"${state.status}"}'
     faults:
-      http500: { status: 500, body: '{"error":"partner down"}' }
+      http500: { status: 500, body: '{"error":"API down"}' }
       timeout: { latency: 10s }              # longer than your client's timeout
