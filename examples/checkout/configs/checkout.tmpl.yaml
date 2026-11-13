@@ -4,3 +4,5 @@ db_dsn: "${deps.db.dsn}"
 payments_url: "${mocks.payments.url}"
 payments_timeout: 2s
 charge_attempts: 3
+kafka_brokers: ["${deps.kafka.brokers}"]
+events_topic: order-events

@@ -140,6 +140,24 @@ func TestMockoonLive(t *testing.T) {
 	if n := len(Filter(calls, "status", "o1")); n != 5 {
 		t.Fatalf("want 5 calls for o1, got %d", n)
 	}
+	// more calls than one admin-API page (10), each with a request header
+	for i := 0; i < 12; i++ {
+		req, _ := http.NewRequest(http.MethodGet, base+"/orders/o3", nil)
+		req.Header.Set("X-Trace-Id", fmt.Sprintf("t%d", i))
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Body.Close()
+	}
+	calls, _ = a.Calls(s)
+	o3 := Filter(calls, "status", "o3")
+	if len(o3) != 12 {
+		t.Fatalf("want all 12 calls for o3 (not one page), got %d of %d", len(o3), len(calls))
+	}
+	if o3[0].Headers["x-trace-id"] != "t0" || o3[11].Headers["x-trace-id"] != "t11" {
+		t.Fatalf("request headers, oldest first: %v … %v", o3[0].Headers, o3[11].Headers)
+	}
 	if err := a.Reset(); err != nil {
 		t.Fatal(err)
 	}

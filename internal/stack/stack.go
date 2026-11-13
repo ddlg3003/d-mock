@@ -57,7 +57,7 @@ func (r *Runner) Data(st *State) (map[string]any, error) {
 		}
 	}
 	// host: how a container service reaches this machine (mocks, container deps' published ports)
-	data := map[string]any{"env": env, "host": HostAlias(), "stack": map[string]any{"dir": r.Stack.Dir, "project": r.Stack.Project}}
+	data := map[string]any{"env": env, "host": HostAlias(), "stack": map[string]any{"dir": r.Stack.Dir, "project": r.Stack.Project, "engine": ContainerCLI()}}
 	deps := map[string]any{}
 	for name, d := range r.Stack.Deps {
 		v, err := tmpl.ExpandAny(toAny(d.Vars()), map[string]any{"env": env})
@@ -69,6 +69,9 @@ func (r *Runner) Data(st *State) (map[string]any, error) {
 			m = map[string]any{}
 		}
 		m["mode"] = d.Mode
+		if d.Mode == "container" {
+			m["container"] = containerName(r.Stack.Project, name) // for `${stack.engine} exec ${deps.x.container} …`
+		}
 		deps[name] = m
 	}
 	data["deps"] = deps
@@ -241,6 +244,11 @@ func (r *Runner) upDep(ctx context.Context, st *State, name string, restart, dry
 		it.Message = err.Error() + "\n" + logs
 		return it, fmt.Errorf("dep %s: %s", name, it.Message)
 	}
+	// a fresh container: run its after_ready (migrations, fixtures)
+	if err := r.afterReady(ctx, "dep", name, d.AfterReady, data); err != nil {
+		it.State, it.Message = "error", err.Error()
+		return it, err
+	}
 	it.State = "started"
 	return it, nil
 }
@@ -293,7 +301,7 @@ func (r *Runner) upMock(ctx context.Context, st *State, name string, restart, dr
 		if err != nil {
 			return it, fmt.Errorf("mock %s: mockoon-cli not found (npm i -g @mockoon/cli@%s, or set mockoon.runner: docker)", name, r.Stack.Mockoon.Version)
 		}
-		pid, err := startProcess(r.Dir, []string{bin, "start", "-d", envPath, "--admin-api-token", ms.Token, "-X", "--max-transaction-logs", "1000"}, nil, ms.Log)
+		pid, err := startProcess(r.Dir, []string{bin, "start", "-d", envPath, "--admin-api-token", ms.Token, "-X", "--max-transaction-logs", fmt.Sprint(mock.MaxCalls)}, nil, ms.Log)
 		if err != nil {
 			return it, err
 		}
@@ -302,7 +310,7 @@ func (r *Runner) upMock(ctx context.Context, st *State, name string, restart, dr
 		cname, err := runContainer(r.Stack.Project, name, "mockoon/cli:"+r.Stack.Mockoon.Version,
 			[]string{fmt.Sprintf("%d:%d", m.Port, m.Port)}, nil,
 			[]string{filepath.Dir(envPath) + ":/data:ro"},
-			[]string{"-d", "/data/" + name + ".json", "--admin-api-token", ms.Token, "--max-transaction-logs", "1000"})
+			[]string{"-d", "/data/" + name + ".json", "--admin-api-token", ms.Token, "--max-transaction-logs", fmt.Sprint(mock.MaxCalls)})
 		if err != nil {
 			return it, err
 		}
@@ -408,6 +416,10 @@ func (r *Runner) upService(ctx context.Context, st *State, name string, restart,
 		it.Message = err.Error()
 		return it, fmt.Errorf("service %s: %w", name, err)
 	}
+	if err := r.afterReady(ctx, "service", name, svc.AfterReady, data); err != nil {
+		it.State, it.Message = "error", err.Error()
+		return it, err
+	}
 	return it, nil
 }
 
@@ -504,6 +516,10 @@ func (r *Runner) upServiceContainer(ctx context.Context, st *State, name string,
 			it.Message = "OOM killed (memory limit " + c.Memory + ")\n" + it.Message
 		}
 		return it, fmt.Errorf("service %s: %s", name, it.Message)
+	}
+	if err := r.afterReady(ctx, "service", name, svc.AfterReady, data); err != nil {
+		it.State, it.Message = "error", err.Error()
+		return it, err
 	}
 	return it, nil
 }
@@ -757,4 +773,27 @@ func waitMockReady(ctx context.Context, a *mock.Admin, logPath string, isDead fu
 		case <-time.After(300 * time.Millisecond):
 		}
 	}
+}
+
+// afterReady runs a dep's or service's after_ready commands from the suite folder, with
+// ${...} references expanded, output appended to .dmock/logs/<name>.log. The first failing
+// command fails the start, with its output in the error.
+func (r *Runner) afterReady(ctx context.Context, kind, name string, cmds []config.Command, data map[string]any) error {
+	for i, c := range cmds {
+		argv := make([]string, len(c))
+		for j, a := range c {
+			v, err := tmpl.Expand(a, data)
+			if err != nil {
+				return fmt.Errorf("%s %s after_ready[%d]: %w", kind, name, i, err)
+			}
+			argv[j] = v
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := runLogged(r.Stack.Dir, argv, r.logPath(name)); err != nil {
+			return fmt.Errorf("%s %s after_ready[%d]: %w", kind, name, i, err)
+		}
+	}
+	return nil
 }

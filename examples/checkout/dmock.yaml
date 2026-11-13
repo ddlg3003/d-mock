@@ -15,6 +15,32 @@ deps:
     remote:
       vars: { dsn: "${env.DEV_DB_DSN}" }   # the secret stays in your shell, not in this file
     ready: { tcp: "localhost:13306", timeout: 120s }
+    # runs once on a fresh container, after ready: your migrations (here the toy's -migrate flag)
+    after_ready:
+      - go run ./service -migrate "${deps.db.dsn}"
+
+  kafka:                       # the service publishes order events here
+    kind: kafka
+    mode: container
+    container:
+      image: apache/kafka:3.8.0
+      ports: ["19092:19092"]
+      env:
+        KAFKA_NODE_ID: "1"
+        KAFKA_PROCESS_ROLES: broker,controller
+        # two listeners: 9092 for tools inside the container, 19092 for your machine
+        KAFKA_LISTENERS: PLAINTEXT://:9092,HOST://:19092,CONTROLLER://:9093
+        KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,HOST://localhost:19092
+        KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+        KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+        KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,HOST:PLAINTEXT
+        KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+        KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+        KAFKA_NUM_PARTITIONS: "1"
+      vars: { brokers: "localhost:19092" }
+    ready: { tcp: "localhost:19092", timeout: 120s }
+    after_ready:               # create the topic before anything publishes to it
+      - ${stack.engine} exec ${deps.kafka.container} /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --if-not-exists --topic order-events
 
 mocks:
   payments: { port: 14001 }    # the fake payment provider: mocks/payments.yaml
@@ -25,4 +51,16 @@ services:
     cmd: ["go", "run", "."]
     env: { CHECKOUT_CONFIG: "${services.checkout.config}" }   # config: configs/checkout.tmpl.yaml
     ready: { http: "http://localhost:18090/healthz", timeout: 120s }
-    depends_on: [db, payments]
+    depends_on: [db, kafka, payments]
+
+# steps that run around the scenarios (same syntax as scenario steps)
+hooks:
+  before_each:                 # every scenario starts against a healthy service
+    - name: checkout is up
+      http: { url: "http://localhost:18090/healthz" }
+      retry: { timeout: 30s, every: 1s }
+      expect: { status: 200 }
+  after_all:                   # whatever the scenarios did, the service never panicked
+    - name: no panic in the whole run
+      log: { service: checkout, grep: "panic" }
+      expect: { count: 0 }

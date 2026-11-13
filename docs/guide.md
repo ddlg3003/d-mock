@@ -14,16 +14,8 @@ A `scenario.yaml` is a test: a list of steps (call an API, change a mock, send a
 
 ## Suite layout
 
-```
-<any-name>/
-├── dmock.yaml                   the stack: project, deps, mocks, services
-├── mocks/<name>.yaml            one per third-party API (mocks.<name> needs only a port)
-├── configs/<service>.tmpl.yaml  service config templates, picked up by name
-├── scenarios/**/*.yaml          one question per file, run in path order (01_, 02_ …)
-├── load/                        k6 scripts
-├── <variant>/dmock.yaml         a nested suite (e.g. the same service in a container), own .dmock/
-└── .dmock/                      generated; gitignore it
-```
+A suite is a folder with `dmock.yaml`, `mocks/`, `configs/`, `scenarios/` (layout and every field:
+`dmock help spec`).
 
 - `dmock init DIR` writes a starter suite that passes `dmock test DIR` as-is.
 - Name a scenario after the question it answers (`02_provider_down_gives_up_after_3.yaml`). Start with the incident you never want again.
@@ -90,8 +82,7 @@ steps:
 
 More help, all built into the binary:
 
-- `dmock help suite`: the suite layout, every `dmock.yaml` field, and the mock spec format.
-- `dmock help steps`: every step type, its arguments, its result fields, and an example.
+- `dmock help spec`: every YAML field: the suite layout, `dmock.yaml`, hooks, mock specs, scenarios, and every step's arguments and result.
 - `dmock help examples`: patterns for the common questions (faults, retries, races, load inside pod limits).
 
 ## Mistakes that look like bugs but are not
@@ -105,13 +96,17 @@ These came up in real use. Check them before you blame the code under test.
 5. **Two workers on the same Temporal task queue split the work.** Only one of them should be up (`dmock up --only worker-fast`).
 6. **A container service can't reach a mock or dep.** Inside a container, `localhost` is the container. Use `${host}` in its config template.
 7. **A load test is refused.** `k6` won't run while a dep is `remote`, to protect shared servers. Switch deps to containers (`--mode db=container`) or pass `--allow-remote-load` if you mean it.
-8. **`sql` refuses a write.** On a `remote` dep, every write must contain the run id. That's on purpose: a test may only touch rows it created. Seed with `sql.insert` (its rows are deleted automatically) or with an `exec` step that calls your seed tool.
+8. **An `exec` step passed although the command failed.** `exec` passes on any exit code unless you `expect: { exit: 0 }`. Its `stdout` keeps the trailing newline, so `save: { x: stdout }` breaks a later shell line: print with `printf`, or print JSON and save `json.x`.
+9. **A `log` step can't see `up` output.** It reads only lines written since the scenario started. Check what `after_ready` printed with `dmock logs NAME`.
+10. **A race test passes and proves nothing.** Two sequential requests aren't a race: use `parallel` so they arrive together, and `repeat` the scenario a few times. Check `count.<field>.<value>`, not `results.0`, since either branch may win.
+11. **A step after an outage fails.** After `stack: { start: db }` the service may need a moment to reconnect: put `retry` on the next check. Whatever a scenario stops comes back after the run anyway.
+12. **`sql` refuses a write.** On a `remote` dep, every write must contain the run id. That's on purpose: a test may only touch rows it created. Seed with `sql.insert` (its rows are deleted automatically) or with an `exec` step that calls your seed tool.
 
 ## Rules dmock enforces (don't try to work around them)
 
-- No DDL (`CREATE/ALTER/DROP/TRUNCATE/...`) on any database.
+- No DDL (`CREATE/ALTER/DROP/TRUNCATE/...`) in `sql` steps. Schemas belong in the dep's `after_ready` (your migration tool).
 - Writes on remote databases must include the run id (in the statement or args, not in a comment). Anything that isn't a plain read counts as a write, including `CALL` and `SET`. One statement per step.
 - A suite's `.dmock/` belongs to that suite. Two stack files in one folder (the old layout) share it, so only one can be up at a time; d-mock refuses to act on another project's running state. Use nested suites instead.
 - `mock set` / `mock fault` (CLI and steps) reject a state field or fault the spec doesn't declare, and unknown CLI flags are an error, so typos fail loudly.
 - `down` never touches remote deps.
-- After every run, dmock deletes the rows it inserted, terminates the workflows it started and resets the mock state it set. Pass `--keep` only to inspect a failure, then clean up by hand.
+- After every run, dmock starts again what it stopped, deletes the rows it inserted, terminates the workflows it started and resets the mock state it set. Pass `--keep` only to inspect a failure, then clean up by hand.

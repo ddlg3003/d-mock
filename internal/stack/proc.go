@@ -228,7 +228,7 @@ func runLogged(dir string, cmd []string, logPath string) error {
 		return err
 	}
 	defer f.Close()
-	fmt.Fprintf(f, "\n=== d-mock pre-build: %s\n", maskArgs(cmd))
+	fmt.Fprintf(f, "\n=== d-mock run %s: %s\n", time.Now().Format(time.RFC3339), maskArgs(cmd))
 	c := exec.Command(cmd[0], cmd[1:]...)
 	c.Dir = dir
 	var out bytes.Buffer
@@ -236,7 +236,7 @@ func runLogged(dir string, cmd []string, logPath string) error {
 	runErr := c.Run()
 	f.Write(out.Bytes())
 	if runErr != nil {
-		return fmt.Errorf("%s: %w\n%s", strings.Join(cmd, " "), runErr, strings.TrimSpace(out.String()))
+		return fmt.Errorf("%s: %w\n%s\n(full output: %s)", maskArgs(cmd), runErr, tailLines(out.String(), 15), logPath)
 	}
 	return nil
 }
@@ -259,4 +259,13 @@ func tcpReady(addr string) bool {
 	}
 	var ne net.Error
 	return errors.As(err, &ne) && ne.Timeout()
+}
+
+// tailLines keeps the last n lines of a command's output for an error message.
+func tailLines(s string, n int) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	if len(lines) > n {
+		lines = append([]string{fmt.Sprintf("… %d lines before", len(lines)-n)}, lines[len(lines)-n:]...)
+	}
+	return strings.Join(lines, "\n")
 }

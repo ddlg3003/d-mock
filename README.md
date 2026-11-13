@@ -22,17 +22,23 @@ scenario.yaml ──dmock run──▶  sql · kafka ·     mock set · fault ·
 - **Choose per dependency: real or local.** Each dependency either points at an existing server (`remote`) or runs in a container. Switch for one run with `--mode db=container`.
 - **Generated service configs.** Config files are templates (`${deps.db.dsn}`, `${mocks.payments.url}`, `${env.TOKEN}`). A missing value is an error, never a silent default.
 - **Services as processes or containers.** Run the code under test as a local process, or build and run it as a container with k8s-like limits (`cpus: "0.5"`, `memory: 256m`). Hitting the memory limit kills the container with exit 137 (OOM), the same as a pod.
+- **Setup hooks.** `after_ready` commands run migrations, create topics or load fixtures once a fresh container is ready.
 - **Safe to repeat.** `up` starts only what is down and restarts a mock when its spec changed. `down` never touches remote dependencies.
 
 **Mocks** (on [Mockoon](https://mockoon.com))
 - **Short YAML instead of Mockoon JSON.** Routes, responses and variants compile to a Mockoon environment.
 - **Per-request state.** Each request is keyed by a URL param, body field or header, so every test entity gets its own answer: `dmock mock set payments order-1 status=APPROVED`.
 - **Fault injection.** HTTP 500s, timeouts or any custom response, for N calls or until cleared: `dmock mock fault payments order-1 http500 --times 3`.
-- **Call recording.** Assert exactly what your service sent, how often and in what order.
+- **Call recording.** Assert exactly what your service sent (body, query, headers), how often and in what order.
 - **Raw and encoded bodies.** Values are never HTML-escaped. Pre-encrypted or signed fixtures are served byte for byte.
 
 **Scenarios**
-- **One YAML format for every kind of step.** `http`, `exec`, `sql`, `kafka`, `temporal`, `mock`, `log`, `service`, `k6` and `sleep`, each with `expect`, `save` and `retry`.
+- **One YAML format for every kind of step.** `http`, `exec`, `sql`, `kafka` (produce and consume), `temporal`, `mock`, `log`, `service`, `stack`, `parallel`, `k6` and `sleep`, each with `expect`, `save` and `retry`.
+- **Races.** A `parallel` step fires steps at the same moment (double submits, a callback racing a poll), optionally offset with `after: 200ms`, and checks the outcome whoever wins: `count.status.202: 1`.
+- **Outages and crashes.** A `stack` step stops, kills or restarts a database, a mock or a service mid-scenario; whatever it took down comes back after the run.
+- **Events.** `kafka: { consume: { topic, key } }` asserts what your service published, without a consumer group.
+- **Table-driven and repeated runs.** `matrix` runs a scenario once per case; `repeat: 20` shakes out flaky races.
+- **Shared steps and hooks.** `include` reuses step lists; suite hooks (`before_all`, `before_each`, `after_each`, `after_all`) run checks and setup around every scenario.
 - **Load tests with [k6](https://k6.io).** A `k6` step runs your script and turns its summary into checkable values: `metrics.http_req_duration.p95: { lt: 500 }`. Combine load with mock faults and resource limits to answer "does it survive a slow third party with 256 MiB?".
 - **Resource checks.** A `service` step reports a container's state, OOM kill, exit code, CPU % and memory use.
 - **Rich checks.** `eq`, `ne`, `contains`, `match`, `gt`/`gte`/`lt`/`lte`, `len` and `exists` on any path of a step's result, including list items (`calls.0.status`).
@@ -52,6 +58,7 @@ Start here if you want to see how you'd use d-mock on your own service:
 
 - **[`examples/checkout`](examples/checkout)**: a service that charges orders through a payment provider.
   - *"If the provider times out, do we charge twice?"*: a scenario breaks the provider for one order, then checks the DB, every call the provider received, and the logs.
+  - *"Double click: charged twice?"*, *"MySQL down: 503 and recovery?"*, *"Is the PAID event published?"*, *"Every provider answer → the right status?"*: `parallel`, `stack`, `kafka consume` and `matrix` in action, with suite hooks and an `after_ready` migration.
   - *"Will it survive launch day inside its pod?"*: k6 load against the service in a container limited to 500m CPU and 128Mi. It checks p95, errors, OOM, and that every accepted checkout really got charged.
 - **[`examples/orders`](examples/orders)**: a callback racing a poll, faults and timeouts, plus a real OOM kill under a memory limit. This is the repo's own end-to-end test (`make e2e`).
 
@@ -102,38 +109,23 @@ dmock -f examples/orders down
 PASS poll path — API fails twice, then approves run=dm582f22 5.1s
 ```
 
-## Suites
+## Writing suites
 
-A suite is a folder with a `dmock.yaml` in it. The folder can have any name and live anywhere; one repo can hold several.
+A suite is a folder with a `dmock.yaml` (any name, anywhere, several per repo):
 
 ```
-test/it/                         ← any name
-├── dmock.yaml                   ← makes the folder a suite: project, deps, mocks, services
-├── mocks/<name>.yaml            ← mock specs: mocks.<name> needs only a port
-├── configs/<service>.tmpl.yaml  ← service config templates, picked up by name
-├── scenarios/                   ← every *.yaml under it, recursively, in path order
-│   ├── 01_happy_path.yaml
-│   └── payments/
-│       ├── 01_timeout.yaml
-│       └── 02_declined.yaml
-├── load/                        ← k6 scripts (paths in steps resolve from the suite folder)
-├── pod-limits/dmock.yaml        ← a nested suite: a variant with its own stack (e.g. in containers)
-└── .dmock/                      ← generated state, logs, rendered configs; gitignore it
+test/it/
+├── dmock.yaml                   the stack: deps, mocks, services, hooks
+├── mocks/<name>.yaml            fake third-party APIs
+├── configs/<service>.tmpl.yaml  service configs with ${...} where addresses go
+├── scenarios/                   one question per file, run in path order
+├── steps/                       shared step lists for `include`
+└── pod-limits/dmock.yaml        a nested suite (e.g. the service in a container)
 ```
 
-**Which suite?** Every command finds its suite the same way: from `-f` (a suite folder, or any stack file), else from the paths you pass to `run`, `test`, `lint` and `doctor`, else from the current folder. Each walks up to the nearest `dmock.yaml`. Paths from two different suites in one command are refused.
-
-**Which scenarios?** `run` and `test` take any mix of:
-
-| Path | Runs |
-|---|---|
-| nothing, or the suite folder | every scenario in `scenarios/` |
-| a folder | every `*.yaml` under it, recursively, except nested suites and hidden folders |
-| a file | that scenario |
-
-**Conventions.** `mocks.<name>.spec` defaults to `mocks/<name>.yaml`. A service's `config.template` defaults to `configs/<service>.tmpl.<ext>` when exactly one such file exists. Anything written explicitly in `dmock.yaml` wins, so older stack files (`stack.yaml`, explicit paths) keep working.
-
-**Nested suites** hold a variant of the stack, for example the same service in a container with CPU/memory limits for load tests. A nested suite has its own `.dmock/`, so give it its own ports and it can run next to its parent. It can reuse the parent's files with relative paths (`spec: ../mocks/partner.yaml`).
+Every field of every file is in **[docs/spec.md](docs/spec.md)** (`dmock help spec`); the working
+loop and common mistakes in [docs/guide.md](docs/guide.md); patterns for faults, retries, races,
+outages, events and load in [docs/examples.md](docs/examples.md).
 
 **In CI** (GitLab shown; the job needs `mockoon-cli`, plus docker/podman and k6 if the suite uses them):
 
@@ -179,191 +171,9 @@ Everything needed to write and run suites is built into the binary, so a person 
 | Command | Prints |
 |---|---|
 | `dmock help guide` | [docs/guide.md](docs/guide.md): the run → read → fix loop, reading a JSON report, a scenario template, mistakes that look like bugs |
-| `dmock help suite` | [docs/suite.md](docs/suite.md): suite layout, every `dmock.yaml` field, the mock spec format |
-| `dmock help steps` | [docs/steps.md](docs/steps.md): every step's arguments, result fields and an example |
-| `dmock help examples` | [docs/examples.md](docs/examples.md): patterns for faults, retries, races and load inside pod limits |
+| `dmock help spec` | [docs/spec.md](docs/spec.md): every YAML field: suite layout, `dmock.yaml`, hooks, mock specs, scenarios, every step |
+| `dmock help examples` | [docs/examples.md](docs/examples.md): patterns for faults, retries, races, outages, events, table-driven cases and load inside pod limits |
 | `dmock version` | the installed version |
-
-## dmock.yaml
-
-```yaml
-project: orders-example          # container names: dmock-<project>-<dep>
-
-deps:
-  redis:
-    kind: redis                  # mysql | kafka | temporal | redis | anything (tells steps how to connect)
-    mode: container              # container | remote
-    container:
-      image: redis:7.2.4
-      ports: ["16379:6379"]
-      env: {}
-      args: []
-      vars: { addr: "localhost:16379" }
-    remote:
-      vars: { addr: "${env.DEV_REDIS_ADDR}" }   # secrets come from your environment, not the file
-    ready: { tcp: "localhost:16379", timeout: 30s }
-
-mocks:
-  partner: { port: 13001 }       # spec defaults to mocks/partner.yaml
-
-mockoon:                         # optional
-  runner: cli                    # cli (mockoon-cli on PATH) | docker (mockoon/cli image)
-  version: 9.10.0
-
-services:
-  orders:
-    dir: toy                     # working directory (relative to the suite folder)
-    cmd: ["go", "run", "."]
-    env: { ORDERS_CONFIG: "${services.orders.config}" }
-    # config defaults to configs/orders.tmpl.yaml; rendered to .dmock/rendered/orders.yaml
-    ready: { http: "http://localhost:18080/healthz", timeout: 90s }   # or tcp: / log: <regex>
-    depends_on: [redis, partner]
-
-  # the same service as a container with resource limits (see the nested suite examples/orders/containers)
-  orders-in-container:
-    config: { template: configs/orders-container.tmpl.yaml }
-    container:
-      image: my/orders:dev           # or build: { context, dockerfile, args, pre: [local build cmd] }
-      cpus: "0.5"                    # docker/podman --cpus   ≈ resources.limits.cpu: 500m
-      memory: 256m                   # --memory (no swap)     ≈ resources.limits.memory: 256Mi
-      ports: ["18080:18080"]
-      env: { ORDERS_CONFIG: /config/orders.yaml }
-      mounts: ["${services.orders-in-container.config}:/config/orders.yaml:ro"]
-    ready: { http: "http://localhost:18080/healthz" }
-```
-
-**Ports.** `lint` and `up` refuse a suite where two things would listen on the same host port: two mocks, or a mock and a container's published port.
-
-**Logs** live in `.dmock/logs/<name>.log`. When a mock or service starts and its log is over 20 MiB, the log moves to `<name>.log.1` (replacing the older one), so logs stay bounded and the previous run stays readable. Secret-looking flags (`--admin-api-token`, `--password=…`) are written as `***` in the start line.
-
-Inside a container, `localhost` is the container itself. Use `${host}` to reach the machine (mocks, container deps' published ports, other local services): it is `host.docker.internal` on docker and `host.containers.internal` on podman. Container logs are copied into `.dmock/logs/<service>.log`, so `logs` and `log` steps work the same for both kinds. `status` shows `OOM-KILLED exit=137` when a container hit its memory limit.
-
-**References.** Service `config` templates, `env` and `cmd` can use `${...}` references:
-
-- `${deps.<name>.<var>}`: the active mode's vars, plus `.mode`.
-- `${mocks.<name>.url|port}`
-- `${services.<name>.config|log}`
-- `${env.VAR}`
-- `${stack.dir}`
-
-An unresolved reference is an error; d-mock never fills in a default. Write `$${` for a literal `${`.
-
-**Processes.** Services run in their own process group, so `down` also stops child processes such as the binary `go run` builds. A service that exits before it's ready fails `up` straight away and shows the last log lines.
-
-## Mock specs
-
-The YAML compiles to a Mockoon environment (`dmock mock compile NAME` shows it).
-
-```yaml
-routes:
-  - id: status                       # used by `mock calls --route status`
-    method: GET
-    path: orders/:id                 # Mockoon path syntax
-    key: "urlParam 'id'"             # Mockoon helper that picks the state key from the request:
-                                     #   urlParam 'x' | bodyRaw 'x' | queryParam 'x' | header 'x'
-    state: { status: PENDING }       # default of each state field the route reads
-    status: 200
-    headers: { Content-Type: application/json }
-    body: '{"id":"${key}","status":"${state.status}"}'
-    variants:                        # other responses picked by state
-      - when: { status: GONE }
-        status: 404
-        body: '{"error":"not found"}'
-    faults:                          # switched on per key at runtime
-      http500: { status: 500, body: '{"error":"down"}' }
-      timeout: { latency: 40s }      # no body: reuses the normal body, just late
-
-  - id: blob
-    method: POST
-    path: secure/inquiry
-    body_file: fixtures/approved.json
-    encode: ["./encrypt.sh"]         # run once at compile time, fixture on stdin, result served as is
-```
-
-**How it works inside Mockoon:**
-
-- **State.** Per-key state lives in Mockoon global variables named `<mock>|<field>|<key>`. `dmock mock set` and scenario `mock` steps write them through Mockoon's admin API. Each run gets a random admin token, stored in `.dmock/state.json`.
-- **Raw values.** `${state.x}` and `${key}` are emitted with `{{{ }}}`, so values aren't HTML-escaped. Mockoon's `{{ }}` would turn `=` into `&#x3D;` and break signed or encoded payloads.
-- **Faults.** A fault is a response with rules on `<mock>|fault|<key>` and a hit counter `<mock>|faultn|<key>`. `--times N` serves the fault N times and then falls back to normal. Without `--times`, it lasts until `mock clear`.
-- **Encoded bodies.** `encode` bodies are served with templating disabled, so the bytes reach the client unchanged. Use this for PGP-encrypted or signed fixtures.
-- **Recorded calls.** Calls come from Mockoon's transaction log (last 1000) and are mapped back to route ids.
-
-You can also use Mockoon helpers such as `{{now}}` or `{{faker 'person.firstName'}}` directly in a body.
-
-## Scenarios
-
-```yaml
-name: poll path — partner fails twice, then approves
-vars:
-  order: "ord-${run}-2"            # ${run} is unique per run (dm + 6 hex)
-  api: "http://localhost:18080"
-
-steps:
-  - name: partner fails twice
-    mock: { name: partner, fault: { key: "${vars.order}", fault: http500, times: 2 } }
-
-  - name: create order
-    http: { method: POST, url: "${vars.api}/orders", json: { id: "${vars.order}" } }
-    expect: { status: 201 }
-    save: { created: json.id }     # → ${saved.created}
-
-  - name: approved by polling
-    http: { url: "${vars.api}/orders/${vars.order}" }
-    retry: { timeout: 15s, every: 500ms }        # re-run until expect passes
-    expect: { json.status: APPROVED, json.decided_by: poll }
-
-cleanup:                           # always runs, even after a failure
-  - http: { method: DELETE, url: "${vars.api}/orders/${vars.order}" }
-```
-
-When a step fails, the remaining steps are skipped and cleanup still runs. `${last.<path>}` refers to the previous step's result.
-
-### Step types and results
-
-| Step | Arguments | Result paths |
-|---|---|---|
-| `http` | `method, url, headers, body` or `json`, `timeout` | `status, body, json, headers` |
-| `exec` | `cmd` (shell line or argv list), `dir, env, stdin, timeout` | `exit, stdout, stderr, json` |
-| `sql` | `dep, query, args`, or `dep, insert: {table, key, row}` | `rows, count` / `affected, key` |
-| `kafka` | `dep, topic, key, value` or `json`, `headers` | `topic, sent` |
-| `temporal` | `dep, action: start\|signal\|describe\|history\|terminate`, `workflow_id, type, task_queue, signal, input` | `status` (RUNNING, COMPLETED…), `events` (TimerCanceled…), `json` |
-| `mock` | `name` plus one of `set: {key, state}`, `fault: {key, fault, times}`, `clear: key`, `reset: true`, `calls: {route, key}` | `count, calls[].{method,path,status,body,json,response}` |
-| `log` | `service` or `mock`, `grep` (a regex; only lines logged since the scenario started) | `count, lines` |
-| `service` | `name` | `state` (running, exited, stopped), `oom_killed`, `exit_code`, `cpu_percent`, `mem_bytes`, `mem_limit_bytes`, `mem_percent` |
-| `k6` | `script, vus, duration, iterations, env, args, timeout` | `exit` (99 = a k6 threshold failed), `metrics.<name>.<stat>` (`p95`, `p99`, `avg`, `max`, `rate`, `count`), `checks.<name>.passes/fails`, `services.<name>.state/oom_killed` (container services after the load) |
-| `sleep` | `"2s"` | |
-
-**Dep vars each step needs:**
-
-- `sql` (kind `mysql`): `dsn`.
-- `kafka`: `brokers` (a list or comma-separated).
-- `temporal`: `address`, `namespace`, and optionally `cli_args` (for TLS flags and the like).
-
-### expect
-
-Each key is a dotted path into the result, and list indexes work (`calls.0.status`). The value is either a literal, compared as text, or a matcher:
-
-```yaml
-expect:
-  status: 200
-  json.status: { ne: WAITING }
-  count: { gte: 1, lt: 4 }
-  events: { contains: TimerCanceled, not_contains: ActivityTaskScheduled }
-  body: { match: "^\\{" }
-  calls: { len: 2 }
-  json.error: { exists: false }
-```
-
-### Safety and cleanup
-
-- **No DDL.** `sql` refuses DDL (`CREATE/ALTER/DROP/TRUNCATE/RENAME/GRANT/REVOKE`) on every dep.
-- **Writes are scoped to the run.** On a `remote` dep, every statement that isn't a plain read (`SELECT/SHOW/DESCRIBE/EXPLAIN`, or a `WITH` that only selects) counts as a write, including `CALL`, `SET` and `LOAD DATA`. A write must contain the run id in the statement or its args, not in a comment. A scenario can only touch rows it created itself.
-- **One statement per step.** Comments are stripped before these checks, so they can't hide a statement's kind.
-- **`sql.insert`** requires the key value to contain the run id, records the row, and deletes it after the run.
-- **Temporal workflows** started by `temporal start` are terminated after the run if they're still running.
-- **Mock state and faults** a scenario set are reset to their defaults after the run.
-- **`--keep`** skips this automatic cleanup so you can inspect the state. Explicit `cleanup:` steps still run.
-- **`--dry-run`** expands and prints each step without running it. A value a step would `save` shows up in later steps as `<saved.name>`.
 
 ## Why d-mock has its own scenario runner (and not Venom)
 
@@ -392,5 +202,6 @@ make e2e-all        # every example suite, including containers and k6 load
 | `temporal` steps | Tested against `temporal server start-dev` and a remote TLS cluster |
 | `sql` and `kafka` steps | Used against a shared MySQL server and Kafka broker (reads, plus writes scoped to the run id) |
 | Container services (build, limits, host access, OOM detection) | Tested end to end with podman (`examples/orders/containers`) |
+| `parallel`, `stack`, `kafka` consume, `matrix`/`repeat`, `include`, hooks, `after_ready` | Tested end to end (`examples/checkout`: double submit, DB outage, order event, provider answers) |
 | `k6` step | Tested end to end (load against a 0.5 CPU / 64 MiB container; OOM shown in the failing step) |
 | `mockoon.runner: docker` | Not tested yet |

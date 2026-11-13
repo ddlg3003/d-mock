@@ -1,0 +1,6 @@
+# Shared steps: a scenario pulls these in with `- include: ../steps/new_order.yaml`.
+# They use the including scenario's vars (here ${vars.order}).
+- name: an order to check out
+  sql:
+    dep: db
+    insert: { table: orders, key: id, row: { id: "${vars.order}", amount: 150000, status: NEW } }

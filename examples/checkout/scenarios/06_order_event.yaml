@@ -1,0 +1,21 @@
+name: order paid — checkout publishes one PAID event for it on Kafka
+vars:
+  order: "ord-${run}"
+  api: "http://localhost:18090"
+
+steps:
+  - include: ../steps/new_order.yaml      # shared arrange steps (steps/ is not run on its own)
+
+  - name: check out
+    http: { method: POST, url: "${vars.api}/checkout", json: { order_id: "${vars.order}" } }
+    expect: { status: 202 }
+
+  - name: one event for this order, saying PAID
+    kafka:
+      dep: kafka
+      consume: { topic: order-events, key: "${vars.order}" }   # only messages written since the scenario started
+    retry: { timeout: 15s, every: 1s }
+    expect:
+      count: 1
+      messages.0.json.status: PAID
+      messages.0.json.order_id: "${vars.order}"

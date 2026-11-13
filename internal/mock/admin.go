@@ -120,6 +120,9 @@ type Call struct {
 	Response    string            `json:"response,omitempty"`
 	TimestampMs int64             `json:"timestamp_ms"`
 	Params      map[string]string `json:"params,omitempty"`
+	// Headers are the request headers the service sent, keys lowercased (HTTP header names
+	// are case-insensitive): headers.authorization, headers.idempotency-key.
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 type rawTx struct {
@@ -129,7 +132,11 @@ type rawTx struct {
 		Route   string `json:"route"`
 		Query   string `json:"query"`
 		Body    string `json:"body"`
-		Params  []struct {
+		Headers []struct {
+			Key   string `json:"key"`
+			Value string `json:"value"`
+		} `json:"headers"`
+		Params []struct {
 			Name  string `json:"name"`
 			Value string `json:"value"`
 		} `json:"params"`
@@ -142,10 +149,14 @@ type rawTx struct {
 	TimestampMs int64  `json:"timestampMs"`
 }
 
+// MaxCalls is how many requests a mock keeps (mockoon-cli --max-transaction-logs).
+const MaxCalls = 1000
+
 // Calls returns recorded requests, oldest first. spec maps route UUIDs back to route ids.
 func (a *Admin) Calls(spec *Spec) ([]Call, error) {
 	var txs []rawTx
-	if err := a.do(http.MethodGet, "/logs", nil, &txs); err != nil {
+	// the admin API pages its logs (10 per page by default): ask for the whole buffer
+	if err := a.do(http.MethodGet, fmt.Sprintf("/logs?limit=%d", MaxCalls), nil, &txs); err != nil {
 		return nil, err
 	}
 	ids := map[string]string{}
@@ -163,6 +174,12 @@ func (a *Admin) Calls(spec *Spec) ([]Call, error) {
 			Method: strings.ToUpper(t.Request.Method), Path: t.Request.URLPath, Route: t.Request.Route,
 			RouteID: ids[t.RouteUUID], Query: t.Request.Query, Body: t.Request.Body,
 			Status: t.Response.StatusCode, Response: t.Response.Body, TimestampMs: t.TimestampMs,
+		}
+		if len(t.Request.Headers) > 0 {
+			c.Headers = map[string]string{}
+			for _, h := range t.Request.Headers {
+				c.Headers[strings.ToLower(h.Key)] = h.Value
+			}
 		}
 		if len(t.Request.Params) > 0 {
 			c.Params = map[string]string{}

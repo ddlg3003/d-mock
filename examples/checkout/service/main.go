@@ -5,8 +5,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -14,6 +17,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/segmentio/kafka-go"
 	"gopkg.in/yaml.v3"
 )
 
@@ -23,15 +27,33 @@ type Config struct {
 	PaymentsURL     string        `yaml:"payments_url"`
 	PaymentsTimeout time.Duration `yaml:"payments_timeout"`
 	ChargeAttempts  int           `yaml:"charge_attempts"`
+	KafkaBrokers    []string      `yaml:"kafka_brokers"` // optional: publish order events
+	EventsTopic     string        `yaml:"events_topic"`
 }
 
 type server struct {
 	cfg  Config
 	db   *sql.DB
 	http *http.Client
+	kw   *kafka.Writer // nil when kafka_brokers is not set
 }
 
+const schema = "CREATE TABLE IF NOT EXISTS orders (id VARCHAR(64) PRIMARY KEY, amount BIGINT NOT NULL, status VARCHAR(16) NOT NULL)"
+
 func main() {
+	migrate := flag.String("migrate", "", "create the schema in this DSN and exit (stands in for your migration tool)")
+	flag.Parse()
+	if *migrate != "" {
+		db, err := sql.Open("mysql", *migrate)
+		if err == nil {
+			_, err = db.Exec(schema)
+		}
+		if err != nil {
+			log.Fatalf("migrate: %v", err)
+		}
+		log.Print("migrate: orders table ready")
+		return
+	}
 	b, err := os.ReadFile(os.Getenv("CHECKOUT_CONFIG"))
 	if err != nil {
 		log.Fatal(err)
@@ -48,11 +70,10 @@ func main() {
 	// query dials MySQL again (the load example's "lost charges" came from exactly that)
 	db.SetMaxOpenConns(20)
 	db.SetMaxIdleConns(20)
-	// stands in for your migrations
-	if _, err := db.Exec("CREATE TABLE IF NOT EXISTS orders (id VARCHAR(64) PRIMARY KEY, amount BIGINT NOT NULL, status VARCHAR(16) NOT NULL)"); err != nil {
-		log.Fatalf("db: %v", err)
-	}
 	s := &server{cfg: cfg, db: db, http: &http.Client{Timeout: cfg.PaymentsTimeout}}
+	if len(cfg.KafkaBrokers) > 0 {
+		s.kw = &kafka.Writer{Addr: kafka.TCP(cfg.KafkaBrokers...), Topic: cfg.EventsTopic, AllowAutoTopicCreation: true, BatchTimeout: 10 * time.Millisecond}
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	mux.HandleFunc("POST /orders", s.createOrder)
@@ -77,7 +98,9 @@ func (s *server) createOrder(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 }
 
-// checkout accepts the order and charges it in the background.
+// checkout claims the order (NEW → CHARGING) and charges it in the background. The claim is
+// one conditional UPDATE, so of two checkouts arriving together exactly one wins; the other
+// gets 409. A DB that is down is a 503 (try again), not a 404.
 func (s *server) checkout(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		OrderID string `json:"order_id"`
@@ -87,8 +110,24 @@ func (s *server) checkout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var amount int64
-	if err := s.db.QueryRow("SELECT amount FROM orders WHERE id = ?", in.OrderID).Scan(&amount); err != nil {
+	err := s.db.QueryRow("SELECT amount FROM orders WHERE id = ?", in.OrderID).Scan(&amount)
+	if errors.Is(err, sql.ErrNoRows) {
 		http.Error(w, "order not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		log.Printf("order=%s checkout: db: %v", in.OrderID, err)
+		http.Error(w, "database unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	res, err := s.db.Exec("UPDATE orders SET status = 'CHARGING' WHERE id = ? AND status = 'NEW'", in.OrderID)
+	if err != nil {
+		log.Printf("order=%s checkout: db: %v", in.OrderID, err)
+		http.Error(w, "database unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		http.Error(w, "checkout already in progress or done", http.StatusConflict)
 		return
 	}
 	go s.charge(in.OrderID, amount)
@@ -140,5 +179,20 @@ func (s *server) post(body []byte) (string, error) {
 func (s *server) setStatus(id, status string) {
 	if _, err := s.db.Exec("UPDATE orders SET status = ? WHERE id = ?", status, id); err != nil {
 		log.Printf("order=%s set status %s: %v", id, status, err)
+		return
+	}
+	s.publish(id, status)
+}
+
+// publish tells the rest of the system the order's outcome (key = order id).
+func (s *server) publish(id, status string) {
+	if s.kw == nil {
+		return
+	}
+	v, _ := json.Marshal(map[string]string{"order_id": id, "status": status})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := s.kw.WriteMessages(ctx, kafka.Message{Key: []byte(id), Value: v}); err != nil {
+		log.Printf("order=%s publish %s: %v", id, status, err)
 	}
 }

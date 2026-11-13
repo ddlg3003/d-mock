@@ -358,9 +358,16 @@ func (c *cli) validate(r *stack.Runner) int {
 		}
 	}
 	for _, f := range files {
-		if _, err := scenario.Load(f); err != nil {
+		sc, err := scenario.Load(f)
+		if err == nil {
+			_, err = sc.Expand()
+		}
+		if err != nil {
 			problems = append(problems, err.Error())
 		}
+	}
+	if _, err := scenario.LoadHooks(r.Stack); err != nil {
+		problems = append(problems, err.Error())
 	}
 	if c.json {
 		c.out(map[string]any{"ok": len(problems) == 0, "problems": problems})
@@ -511,7 +518,11 @@ func (c *cli) runScenarios(ctx context.Context, r *stack.Runner) int {
 		if err != nil {
 			return c.fail(2, err)
 		}
-		scs = append(scs, sc)
+		runs, err := sc.Expand() // matrix cases × repeat
+		if err != nil {
+			return c.fail(2, fmt.Errorf("%s: %w", f, err))
+		}
+		scs = append(scs, runs...)
 	}
 	opt := scenario.Options{DryRun: c.bools["dry-run"], KeepState: c.bools["keep"], RunID: c.flags["run-id"], Verbose: c.bools["verbose"], AllowRemoteLoad: c.bools["allow-remote-load"]}
 	if !c.json {
@@ -537,27 +548,35 @@ func (c *cli) runScenarios(ctx context.Context, r *stack.Runner) int {
 		}
 	}
 	runner := &scenario.Runner{Stack: r, Opt: opt}
-	var reports []*scenario.Report
-	failed := 0
-	for _, sc := range scs {
+	failed, skipped := 0, 0
+	onStart := func(name, file string) {
 		if !c.json {
-			fmt.Printf("▶ %s (%s)\n", sc.Name, sc.Path)
+			fmt.Printf("▶ %s (%s)\n", name, file)
 		}
-		rep, err := runner.Run(ctx, sc)
-		if err != nil {
-			return c.fail(2, fmt.Errorf("%s: %w", sc.Path, err))
-		}
-		reports = append(reports, rep)
-		if !rep.Passed {
+	}
+	onDone := func(rep *scenario.Report) {
+		switch {
+		case rep.Skipped:
+			skipped++
+		case !rep.Passed:
 			failed++
 		}
-		if !c.json {
-			verdict := "PASS"
-			if !rep.Passed {
-				verdict = "FAIL"
-			}
-			fmt.Printf("%s %s run=%s %s\n\n", verdict, sc.Name, rep.RunID, rep.Duration)
+		if c.json {
+			return
 		}
+		verdict := "PASS"
+		switch {
+		case rep.Skipped:
+			fmt.Printf("SKIP %s (%s)\n\n", rep.Scenario, rep.Steps[0].Name)
+			return
+		case !rep.Passed:
+			verdict = "FAIL"
+		}
+		fmt.Printf("%s %s run=%s %s\n\n", verdict, rep.Scenario, rep.RunID, rep.Duration)
+	}
+	reports, err := runner.RunSuite(ctx, scs, onStart, onDone)
+	if err != nil {
+		return c.fail(2, err)
 	}
 	if p := c.flags["junit"]; p != "" {
 		if err := writeJUnit(p, r.Stack.Project, reports); err != nil {
@@ -565,11 +584,13 @@ func (c *cli) runScenarios(ctx context.Context, r *stack.Runner) int {
 		}
 	}
 	if c.json {
-		c.out(map[string]any{"ok": failed == 0, "passed": len(reports) - failed, "failed": failed, "reports": reports})
+		c.out(map[string]any{"ok": failed+skipped == 0, "passed": len(reports) - failed - skipped, "failed": failed, "skipped": skipped, "reports": reports})
+	} else if skipped > 0 {
+		fmt.Printf("%d passed, %d failed, %d skipped\n", len(reports)-failed-skipped, failed, skipped)
 	} else {
 		fmt.Printf("%d passed, %d failed\n", len(reports)-failed, failed)
 	}
-	if failed > 0 {
+	if failed+skipped > 0 {
 		return 1
 	}
 	return 0

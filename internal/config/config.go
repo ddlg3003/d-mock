@@ -19,6 +19,9 @@ type Stack struct {
 	Mocks    map[string]*Mock    `yaml:"mocks"`
 	Services map[string]*Service `yaml:"services"`
 	Mockoon  MockoonEngine       `yaml:"mockoon"`
+	// Hooks are scenario steps run around scenarios (before_all, before_each, after_each,
+	// after_all). They are decoded by the scenario package, which owns the step format.
+	Hooks map[string]yaml.Node `yaml:"hooks"`
 
 	// Dir is the directory of stack.yaml; every relative path resolves against it.
 	Dir string `yaml:"-"`
@@ -32,6 +35,9 @@ type Dep struct {
 	Container *Container `yaml:"container"`
 	Remote    *Remote    `yaml:"remote"`
 	Ready     *Ready     `yaml:"ready"`
+	// AfterReady runs once a container dep is (re)created and ready, before anything that
+	// depends on it starts: migrations, fixture loads. Never for remote deps.
+	AfterReady []Command `yaml:"after_ready"`
 }
 
 type Container struct {
@@ -77,6 +83,8 @@ type Service struct {
 	Config    *ConfigFile       `yaml:"config"`
 	Ready     *Ready            `yaml:"ready"`
 	DependsOn []string          `yaml:"depends_on"`
+	// AfterReady runs each time the service has (re)started and is ready.
+	AfterReady []Command `yaml:"after_ready"`
 }
 
 // ServiceContainer runs a service in a container with k8s-like resource limits.
@@ -229,6 +237,15 @@ func (s *Stack) Validate() error {
 			}
 		}
 	}
+	for name := range s.Hooks {
+		known := false
+		for _, h := range HookNames {
+			known = known || h == name
+		}
+		if !known {
+			return fmt.Errorf("hooks.%s: unknown hook (have: %s)", name, strings.Join(HookNames, ", "))
+		}
+	}
 	if err := s.checkPorts(); err != nil {
 		return err
 	}
@@ -332,3 +349,28 @@ func (s *Stack) checkPorts() error {
 	}
 	return nil
 }
+
+// Command is a hook command: a list is an argv, a plain string runs through `sh -c`.
+type Command []string
+
+func (c *Command) UnmarshalYAML(n *yaml.Node) error {
+	switch n.Kind {
+	case yaml.ScalarNode:
+		*c = Command{"sh", "-c", n.Value}
+		return nil
+	case yaml.SequenceNode:
+		var argv []string
+		if err := n.Decode(&argv); err != nil {
+			return err
+		}
+		if len(argv) == 0 {
+			return fmt.Errorf("line %d: empty command", n.Line)
+		}
+		*c = argv
+		return nil
+	}
+	return fmt.Errorf("line %d: a command is a string or a list", n.Line)
+}
+
+// HookNames are the suite hooks, in the order they run.
+var HookNames = []string{"before_all", "before_each", "after_each", "after_all"}

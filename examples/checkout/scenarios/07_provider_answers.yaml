@@ -1,0 +1,28 @@
+name: provider answers — each answer ends in the right order status, with one charge
+matrix:                                  # one run per row; ${matrix.case.*} in the steps
+  case:
+    - { provider: SUCCEEDED, order: PAID }
+    - { provider: DECLINED, order: FAILED }
+    - { provider: INSUFFICIENT_FUNDS, order: FAILED }
+vars:
+  order: "ord-${run}"                    # every matrix run has its own ${run}
+  api: "http://localhost:18090"
+
+steps:
+  - include: ../steps/new_order.yaml
+
+  - name: the provider answers ${matrix.case.provider}
+    mock: { name: payments, set: { key: "${vars.order}", state: { result: "${matrix.case.provider}" } } }
+
+  - name: check out
+    http: { method: POST, url: "${vars.api}/checkout", json: { order_id: "${vars.order}" } }
+    expect: { status: 202 }
+
+  - name: the order ends up ${matrix.case.order}
+    sql: { dep: db, query: "SELECT status FROM orders WHERE id = ?", args: ["${vars.order}"] }
+    retry: { timeout: 10s, every: 500ms }
+    expect: { rows.0.status: "${matrix.case.order}" }
+
+  - name: charged exactly once
+    mock: { name: payments, calls: { route: charge, key: "${vars.order}" } }
+    expect: { count: 1 }

@@ -31,6 +31,7 @@ type Report struct {
 	File     string       `json:"file"`
 	RunID    string       `json:"run_id"`
 	Passed   bool         `json:"passed"`
+	Skipped  bool         `json:"skipped,omitempty"` // never ran: before_all failed or the run was interrupted
 	DryRun   bool         `json:"dry_run,omitempty"`
 	Duration string       `json:"duration"`
 	Steps    []StepResult `json:"steps"`
@@ -51,6 +52,9 @@ type Options struct {
 type Runner struct {
 	Stack *stack.Runner
 	Opt   Options
+
+	suiteSaved map[string]any    // what before_all saved, seen by every scenario as ${saved.x}
+	hooks      map[string][]Step // suite hooks, set by RunSuite
 }
 
 // run is the state of one scenario execution.
@@ -61,6 +65,7 @@ type run struct {
 	saved   map[string]any
 	ledger  *ledger
 	logOffs map[string]int64
+	start   time.Time // when the scenario started: kafka consume reads from here
 }
 
 func NewRunID() string {
@@ -69,12 +74,39 @@ func NewRunID() string {
 	return "dm" + hex.EncodeToString(b)
 }
 
+// Run executes one scenario run: before_each, its steps, its cleanup steps, after_each, then
+// the automatic cleanup.
 func (r *Runner) Run(ctx context.Context, sc *Scenario) (*Report, error) {
 	start := time.Now()
 	id := r.Opt.RunID
 	if id == "" {
 		id = NewRunID()
 	}
+	ru, err := r.newRun(sc, id, start)
+	if err != nil {
+		return nil, err
+	}
+	rep := &Report{Scenario: sc.Name, File: sc.Path, RunID: id, Passed: true, DryRun: r.Opt.DryRun}
+	steps := append(hookSteps("before_each", r.hooks["before_each"]), sc.Steps...)
+	rep.Passed = ru.runSteps(ctx, steps, "", &rep.Steps)
+
+	// cleanup always runs, even after Ctrl-C: it gets its own context so a cancelled run
+	// still deletes its rows and terminates its workflows. Explicit steps first, then the
+	// after_each hook, then the ledger (unless --keep).
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+	defer cancel()
+	ru.runAll(cctx, sc.Cleanup, "cleanup: ", &rep.Cleanup)
+	if !ru.runAll(cctx, hookSteps("after_each", r.hooks["after_each"]), "", &rep.Cleanup) {
+		rep.Passed = false // a failed after_each hook fails the scenario it ran after
+	}
+	ru.undoLedger(cctx, &rep.Cleanup)
+	rep.Duration = time.Since(start).Round(time.Millisecond).String()
+	return rep, nil
+}
+
+// newRun prepares the data a run's steps see: ${run}, ${saved}, ${matrix}, ${iteration},
+// ${vars}, and the log offsets for log steps.
+func (r *Runner) newRun(sc *Scenario, id string, start time.Time) (*run, error) {
 	st, err := r.Stack.State()
 	if err != nil {
 		return nil, err
@@ -83,9 +115,16 @@ func (r *Runner) Run(ctx context.Context, sc *Scenario) (*Report, error) {
 	if err != nil {
 		return nil, err
 	}
-	ru := &run{r: r, id: id, data: data, saved: map[string]any{}, ledger: &ledger{}, logOffs: map[string]int64{}}
+	ru := &run{r: r, id: id, data: data, saved: map[string]any{}, ledger: &ledger{}, logOffs: map[string]int64{}, start: start}
 	data["run"] = id
+	for k, v := range r.suiteSaved { // values saved by the before_all hook
+		ru.saved[k] = v
+	}
 	data["saved"] = ru.saved
+	if sc.MatrixValues != nil {
+		data["matrix"] = sc.MatrixValues
+	}
+	data["iteration"] = max(sc.Iteration, 1)
 	vars := map[string]any{}
 	data["vars"] = vars
 	// vars may reference earlier vars and ${run}: expand in file order is not kept by YAML maps,
@@ -117,49 +156,55 @@ func (r *Runner) Run(ctx context.Context, sc *Scenario) (*Report, error) {
 			}
 		}
 	}
+	return ru, nil
+}
 
-	rep := &Report{Scenario: sc.Name, File: sc.Path, RunID: id, Passed: true, DryRun: r.Opt.DryRun}
-	failed := false
-	for i, step := range sc.Steps {
-		if failed {
+// runSteps runs steps in order and stops at the first failure (the rest are reported as
+// skipped). It reports whether all passed.
+func (ru *run) runSteps(ctx context.Context, steps []Step, prefix string, into *[]StepResult) bool {
+	ok := true
+	for i, step := range steps {
+		if !ok {
 			typ, _, _ := step.Type()
-			rep.Steps = append(rep.Steps, StepResult{Name: stepName(step, i), Type: typ, Skipped: true})
+			*into = append(*into, StepResult{Name: prefix + stepName(step, i), Type: typ, Skipped: true})
 			continue
 		}
 		res := ru.runStep(ctx, step, i)
-		rep.Steps = append(rep.Steps, res)
-		if r.Opt.Progress != nil {
-			r.Opt.Progress(res)
+		res.Name = prefix + res.Name
+		*into = append(*into, res)
+		if ru.r.Opt.Progress != nil {
+			ru.r.Opt.Progress(res)
 		}
-		if !res.Passed {
-			failed = true
-			rep.Passed = false
-		}
+		ok = res.Passed
 	}
+	return ok
+}
 
-	// cleanup always runs, even after Ctrl-C: it gets its own context so a cancelled run
-	// still deletes its rows and terminates its workflows. Explicit steps first, then the
-	// ledger (unless --keep).
-	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
-	defer cancel()
-	for i, step := range sc.Cleanup {
-		res := ru.runStep(cctx, step, i)
-		res.Name = "cleanup: " + res.Name
-		rep.Cleanup = append(rep.Cleanup, res)
-		if r.Opt.Progress != nil {
-			r.Opt.Progress(res)
+// runAll runs every step even after a failure (cleanup and after_* hooks).
+func (ru *run) runAll(ctx context.Context, steps []Step, prefix string, into *[]StepResult) bool {
+	ok := true
+	for i, step := range steps {
+		res := ru.runStep(ctx, step, i)
+		res.Name = prefix + res.Name
+		*into = append(*into, res)
+		if ru.r.Opt.Progress != nil {
+			ru.r.Opt.Progress(res)
+		}
+		ok = ok && res.Passed
+	}
+	return ok
+}
+
+func (ru *run) undoLedger(ctx context.Context, into *[]StepResult) {
+	if ru.r.Opt.KeepState || ru.r.Opt.DryRun {
+		return
+	}
+	for _, res := range ru.ledger.undo(ctx, ru) {
+		*into = append(*into, res)
+		if ru.r.Opt.Progress != nil {
+			ru.r.Opt.Progress(res)
 		}
 	}
-	if !r.Opt.KeepState && !r.Opt.DryRun {
-		for _, res := range ru.ledger.undo(cctx, ru) {
-			rep.Cleanup = append(rep.Cleanup, res)
-			if r.Opt.Progress != nil {
-				r.Opt.Progress(res)
-			}
-		}
-	}
-	rep.Duration = time.Since(start).Round(time.Millisecond).String()
-	return rep, nil
 }
 
 func stepName(s Step, i int) string {
@@ -173,7 +218,11 @@ func stepName(s Step, i int) string {
 func (ru *run) runStep(ctx context.Context, step Step, i int) (res StepResult) {
 	start := time.Now()
 	typ, rawArgs, err := step.Type()
-	res = StepResult{Name: stepName(step, i), Type: typ}
+	name := stepName(step, i)
+	if x, xerr := tmpl.Expand(name, ru.data); xerr == nil { // names may use ${matrix.x} etc.
+		name = x
+	}
+	res = StepResult{Name: name, Type: typ}
 	defer func() { res.Duration = time.Since(start).Round(time.Millisecond).String() }()
 	if err != nil {
 		res.Error = err.Error()
@@ -189,9 +238,15 @@ func (ru *run) runStep(ctx context.Context, step Step, i int) (res StepResult) {
 	deadline := time.Now().Add(timeout)
 	for {
 		res.Attempts++
-		args, err := tmpl.ExpandAny(rawArgs, ru.data)
+		var args any
 		var out map[string]any
-		if err == nil {
+		if typ == "parallel" {
+			out, err = ru.execParallel(ctx, step)
+			if ru.r.Opt.DryRun { // the branches showed their args; nothing ran to check
+				res.Passed, res.Result = true, out
+				return res
+			}
+		} else if args, err = tmpl.ExpandAny(rawArgs, ru.data); err == nil {
 			if ru.r.Opt.DryRun {
 				res.Passed = true
 				res.Result = map[string]any{"args": args}
@@ -291,6 +346,8 @@ func (ru *run) exec(ctx context.Context, typ string, args map[string]any) (map[s
 		return ru.execLog(args)
 	case "service":
 		return ru.execService(args)
+	case "stack":
+		return ru.execStack(ctx, args)
 	case "k6":
 		return ru.execK6(ctx, args)
 	case "sleep":

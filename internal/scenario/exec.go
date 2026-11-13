@@ -424,6 +424,9 @@ func (ru *run) execKafka(ctx context.Context, a map[string]any) (map[string]any,
 	if len(brokers) == 0 {
 		return nil, fmt.Errorf("dep %s has no brokers var", str(a, "dep"))
 	}
+	if c, ok := a["consume"].(map[string]any); ok {
+		return ru.kafkaConsume(ctx, brokers, c)
+	}
 	var value []byte
 	if j, ok := a["json"]; ok {
 		if value, err = json.Marshal(j); err != nil {

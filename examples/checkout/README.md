@@ -34,13 +34,18 @@ This folder is a d-mock **suite** (it has a `dmock.yaml`), with a nested suite f
 
 ```
 examples/checkout/
-├── dmock.yaml                    what to start: MySQL, the fake provider, the service
+├── dmock.yaml                    what to start: MySQL, Kafka, the fake provider, the service; hooks
 ├── configs/checkout.tmpl.yaml    the service's normal config, with ${...} where addresses go
 ├── mocks/payments.yaml           the fake payment provider: routes, default answer, faults
 ├── scenarios/                    use case 1: one question per file
 │   ├── 01_provider_timeout.yaml
 │   ├── 02_provider_down.yaml
-│   └── 03_card_declined.yaml
+│   ├── 03_card_declined.yaml
+│   ├── 04_double_submit.yaml     a race: parallel
+│   ├── 05_db_outage.yaml         an outage: stack stop/start
+│   ├── 06_order_event.yaml       an event: kafka consume
+│   └── 07_provider_answers.yaml  table-driven: matrix
+├── steps/new_order.yaml          shared arrange steps, pulled in with `include`
 ├── pod-limits/                   use case 2, a nested suite with its own stack and .dmock/
 │   ├── dmock.yaml                the same service, in a container with the pod's limits
 │   ├── configs/checkout.tmpl.yaml
@@ -126,14 +131,14 @@ API, wait and look at the DB, check what the provider received, grep the log.
 ### Run it
 
 ```bash
-dmock test examples/checkout        # up, all 3 scenarios, down: what CI runs
+dmock test examples/checkout        # up, every scenario, down: what CI runs
 ```
 
 Or keep the stack up while you work, and run one scenario at a time:
 
 ```bash
 cd examples/checkout
-dmock up                            # MySQL in a container, the fake provider, the service; waits until ready
+dmock up                            # MySQL and Kafka in containers, the fake provider, the service; waits until ready
 dmock run scenarios/01_provider_timeout.yaml
 dmock down
 ```
@@ -174,6 +179,34 @@ is deleted and the fault is cleared.
 |---|---|---|
 | [`02_provider_down.yaml`](scenarios/02_provider_down.yaml) | `fault: http500` with no `times` (until cleared) | gives up after exactly 3 attempts, order `FAILED` |
 | [`03_card_declined.yaml`](scenarios/03_card_declined.yaml) | `set: { state: { result: DECLINED } }` instead of a fault | charged once and **not** retried, order `FAILED` |
+
+### Harder questions: races, outages, events, every answer
+
+| Scenario | Question | How |
+|---|---|---|
+| [`04_double_submit.yaml`](scenarios/04_double_submit.yaml) | The customer double-clicks: charged twice? | `parallel: { times: 2, step: … }` sends both checkouts at the same moment; expects `count.status.202: 1`, `count.status.409: 1` and one charge. `repeat: 3`, since a race can pass by luck. |
+| [`05_db_outage.yaml`](scenarios/05_db_outage.yaml) | MySQL goes down: does checkout say "try again" and recover? | `stack: { stop: db }` → expects 503 → `stack: { start: db }` → `retry` until 202 |
+| [`06_order_event.yaml`](scenarios/06_order_event.yaml) | Is a PAID event published for the order? | `kafka: { consume: { topic: order-events, key: … } }` with `retry`; expects one message saying PAID |
+| [`07_provider_answers.yaml`](scenarios/07_provider_answers.yaml) | Does every provider answer end in the right status? | `matrix` over (provider answer → order status): 3 runs from one file |
+
+The first version of the toy read the order and then charged it, so `04` failed for real:
+
+```
+  ✗ the customer double-clicks, two checkouts arrive together [parallel] 9ms
+      expect: count.status.202: got "2", want "1"
+      expect: count.status.409: missing (want eq 1)
+```
+
+The fix in `service/main.go` is an atomic claim: `UPDATE orders SET status='CHARGING' WHERE
+id=? AND status='NEW'`, and 0 rows affected answers 409.
+
+The suite also shows the setup features:
+
+- **`after_ready`** on `db` runs the toy's migration (`go run ./service -migrate …`) on a fresh
+  container, and on `kafka` creates the `order-events` topic.
+- **Hooks** in `dmock.yaml`: `before_each` waits until checkout is healthy (useful after `05`),
+  `after_all` checks the log never shows a panic.
+- **`include`**: `06` and `07` share their arrange step from `steps/new_order.yaml`.
 
 You can also break things by hand while developing, with no scenario:
 

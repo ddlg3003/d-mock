@@ -104,10 +104,173 @@ The DB alone would say "PAID" even with the double-charge bug; the recorded mock
 |---|---|
 | Provider down for good: do we give up and mark FAILED? | `fault: http500` with no `times`; expect `rows.0.status: FAILED`, `count: 3` calls |
 | Declined: do we stop retrying? | `mock: { set: { key, state: { result: DECLINED } } }`; expect `count: 1` call |
-| Callback races the poll: which one wins? | `http` the callback endpoint while the mock answers the poll; expect the decision recorded once |
+| Callback races the poll: which one wins? | `parallel` the poll and the callback (`after: 200ms` on one to force the order); expect the decision recorded once |
 | Async event consumed? | `kafka` a message, then `sql` / `http` with `retry` until the effect shows |
+| Event published? | `kafka: { consume: { topic, key } }` with `retry`; expect `count: 1` |
 | Workflow timer cancelled by a signal? | `temporal: { action: signal }`, then `temporal: { action: history }` expect `events: { contains: TimerCanceled }` |
 | Nothing should happen | `sleep` past the deadline, then expect `count: 0` calls |
+
+## Question: a double click — charged twice?
+
+Two requests sent one after the other are not a race. `parallel` fires them at the same moment,
+and `count` checks the outcome without caring which one won:
+
+```yaml
+name: double submit — two checkouts of the same order at the same moment charge it once
+vars:
+  order: "ord-${run}"
+  api: "http://localhost:18090"
+repeat: 5                        # a race may pass by luck: run it a few times
+steps:
+  - include: ../steps/new_order.yaml
+  - name: the customer double-clicks
+    parallel:
+      times: 2
+      step:
+        http: { method: POST, url: "${vars.api}/checkout", json: { order_id: "${vars.order}" } }
+    expect:
+      count.status.202: 1        # one is accepted…
+      count.status.409: 1        # …the other is told it's already in progress
+  - name: the provider was charged exactly once
+    mock: { name: payments, calls: { route: charge, key: "${vars.order}" } }
+    retry: { timeout: 10s }
+    expect: { count: 1 }
+```
+
+Against a service that reads the order and then charges it, this fails with
+`count.status.202: got "2", want "1"`. The fix is an atomic claim
+(`UPDATE … SET status='CHARGING' WHERE id=? AND status='NEW'`; 0 rows → 409).
+
+Different steps side by side, one delayed to force an interleaving:
+
+```yaml
+- name: the callback lands while the poll is in flight
+  parallel:
+    steps:
+      - name: poll
+        http: { method: POST, url: "${vars.api}/jobs/poll-now" }
+      - name: callback
+        after: 200ms
+        http: { method: POST, url: "${vars.api}/callbacks/partner", json: { id: "${vars.order}", status: APPROVED } }
+```
+
+## Question: what happens when the database goes down?
+
+```yaml
+name: database outage — checkout answers 503 while MySQL is down, and works again once it's back
+steps:
+  - include: ../steps/new_order.yaml
+  - name: MySQL goes down (the container is stopped, its data kept)
+    stack: { stop: db }          # or kill: (a crash), restart:; also mocks and services
+  - name: checkout says "try again", not "order not found"
+    http: { method: POST, url: "${vars.api}/checkout", json: { order_id: "${vars.order}" }, timeout: 15s }
+    expect: { status: 503 }
+  - name: MySQL comes back
+    stack: { start: db }
+  - name: the same checkout now goes through (the pool reconnects by itself)
+    http: { method: POST, url: "${vars.api}/checkout", json: { order_id: "${vars.order}" } }
+    retry: { timeout: 30s }
+    expect: { status: 202 }
+```
+
+The same shape answers "does the worker resume after a crash?" (`stack: { kill: worker }`, then
+`start`) and "does it survive the partner restarting?" (`stack: { restart: payments }`). Whatever
+a scenario leaves down is started again after the run.
+
+## Question: is the event published?
+
+The service under test publishes to Kafka; `consume` reads the topic from just before the
+scenario started (no consumer group, so your service's consumers are untouched):
+
+```yaml
+- name: one event for this order, saying PAID
+  kafka:
+    dep: kafka
+    consume: { topic: order-events, key: "${vars.order}" }   # or match: { json.path: value }
+  retry: { timeout: 15s }
+  expect: { count: 1, messages.0.json.status: PAID }
+```
+
+A Kafka container with the topic created by `after_ready` (two listeners: one for tools inside
+the container, one for your machine):
+
+```yaml
+deps:
+  kafka:
+    kind: kafka
+    mode: container
+    container:
+      image: apache/kafka:3.8.0
+      ports: ["19092:19092"]
+      env:
+        KAFKA_NODE_ID: "1"
+        KAFKA_PROCESS_ROLES: broker,controller
+        KAFKA_LISTENERS: PLAINTEXT://:9092,HOST://:19092,CONTROLLER://:9093
+        KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,HOST://localhost:19092
+        KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+        KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+        KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,HOST:PLAINTEXT
+        KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+        KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      vars: { brokers: "localhost:19092" }
+    ready: { tcp: "localhost:19092", timeout: 120s }
+    after_ready:
+      - ${stack.engine} exec ${deps.kafka.container} /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --if-not-exists --topic order-events
+```
+
+## Question: does every answer lead to the right state? (table-driven)
+
+One scenario, one run per row of `matrix`:
+
+```yaml
+name: provider answers — each answer ends in the right order status, with one charge
+matrix:
+  case:
+    - { provider: SUCCEEDED, order: PAID }
+    - { provider: DECLINED, order: FAILED }
+    - { provider: INSUFFICIENT_FUNDS, order: FAILED }
+vars:
+  order: "ord-${run}"            # every run has its own ${run}
+steps:
+  - include: ../steps/new_order.yaml
+  - name: the provider answers ${matrix.case.provider}
+    mock: { name: payments, set: { key: "${vars.order}", state: { result: "${matrix.case.provider}" } } }
+  - http: { method: POST, url: "${vars.api}/checkout", json: { order_id: "${vars.order}" } }
+    expect: { status: 202 }
+  - name: the order ends up ${matrix.case.order}
+    sql: { dep: db, query: "SELECT status FROM orders WHERE id = ?", args: ["${vars.order}"] }
+    retry: { timeout: 10s }
+    expect: { rows.0.status: "${matrix.case.order}" }
+```
+
+Several keys combine (`partner: [A, B]` × 3 cases = 6 runs). Each run is reported (and in JUnit)
+as `name [partner=A case={…}]`.
+
+## Shared setup: migrations, hooks, includes
+
+```yaml
+# dmock.yaml
+deps:
+  db:
+    # …
+    after_ready:                 # a fresh container gets your schema
+      - go run ./cmd/migrate -dsn "${deps.db.dsn}"
+hooks:
+  before_each:                   # every scenario starts against a healthy service
+    - name: checkout is up
+      http: { url: "http://localhost:18090/healthz" }
+      retry: { timeout: 30s }
+      expect: { status: 200 }
+  after_all:                     # whatever the scenarios did, the service never panicked
+    - name: no panic in the whole run
+      log: { service: checkout, grep: "panic" }
+      expect: { count: 0 }
+```
+
+`before_all` is for one-time setup whose values every scenario needs (a token:
+`save: { token: json.access_token }` → `${saved.token}`). If it fails, every scenario is
+reported SKIP. Arrange steps repeated across scenarios go in `steps/*.yaml` and are pulled in
+with `- include: ../steps/new_order.yaml`.
 
 ## Question: does it survive load inside its pod?
 

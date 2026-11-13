@@ -1,0 +1,30 @@
+name: database outage — checkout answers 503 while MySQL is down, and works again once it's back
+vars:
+  order: "ord-${run}"
+  api: "http://localhost:18090"
+
+steps:
+  - name: an order to check out
+    sql:
+      dep: db
+      insert: { table: orders, key: id, row: { id: "${vars.order}", amount: 150000, status: NEW } }
+
+  - name: MySQL goes down (the container is stopped, its data kept)
+    stack: { stop: db }
+
+  - name: checkout says "try again", not "order not found"
+    http: { method: POST, url: "${vars.api}/checkout", json: { order_id: "${vars.order}" }, timeout: 15s }
+    expect: { status: 503 }
+
+  - name: MySQL comes back
+    stack: { start: db }
+
+  - name: the same checkout now goes through (the pool reconnects by itself)
+    http: { method: POST, url: "${vars.api}/checkout", json: { order_id: "${vars.order}" } }
+    retry: { timeout: 30s, every: 1s }
+    expect: { status: 202 }
+
+  - name: the order ends up PAID
+    sql: { dep: db, query: "SELECT status FROM orders WHERE id = ?", args: ["${vars.order}"] }
+    retry: { timeout: 10s, every: 500ms }
+    expect: { rows.0.status: PAID }

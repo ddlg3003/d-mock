@@ -10,7 +10,7 @@ import (
 
 // undo is something a scenario created that cleanup removes again.
 type undo struct {
-	Kind       string // sql | temporal | mock-state | mock-fault
+	Kind       string // sql | temporal | mock-state | mock-fault | stack (Mock = the name)
 	Dep        string
 	Table      string
 	Key        string
@@ -39,11 +39,22 @@ func (l *ledger) add(u undo) {
 	l.items = append(l.items, u)
 }
 
-// undo runs in reverse order; every item is attempted even if an earlier one fails.
+// undo runs in reverse order; every item is attempted even if an earlier one fails. Parts of
+// the stack a scenario took down come back first: deleting rows needs the database up.
 func (l *ledger) undo(ctx context.Context, ru *run) []StepResult {
 	var out []StepResult
+	order := make([]undo, 0, len(l.items))
+	for _, u := range l.items {
+		if u.Kind == "stack" {
+			order = append(order, u)
+		}
+	}
 	for i := len(l.items) - 1; i >= 0; i-- {
-		u := l.items[i]
+		if l.items[i].Kind != "stack" {
+			order = append(order, l.items[i])
+		}
+	}
+	for _, u := range order {
 		res := StepResult{Type: "cleanup", Attempts: 1, Passed: true}
 		var err error
 		switch u.Kind {
@@ -56,6 +67,9 @@ func (l *ledger) undo(ctx context.Context, ru *run) []StepResult {
 		case "mock-state":
 			res.Name = fmt.Sprintf("auto: clear mock %s state for %s", u.Mock, u.Key)
 			err = ru.clearMockState(u)
+		case "stack":
+			res.Name = "auto: make sure " + u.Mock + " is running again"
+			err = ru.restoreStack(ctx, u.Mock)
 		case "mock-fault":
 			res.Name = fmt.Sprintf("auto: clear mock %s fault for %s", u.Mock, u.Key)
 			if admin, _, aerr := ru.r.Stack.MockAdmin(u.Mock); aerr != nil {

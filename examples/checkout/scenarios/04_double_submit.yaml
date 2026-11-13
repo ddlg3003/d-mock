@@ -1,0 +1,29 @@
+name: double submit — two checkouts of the same order at the same moment charge it once
+vars:
+  order: "ord-${run}"
+  api: "http://localhost:18090"
+repeat: 3                      # a race can pass by luck: run it a few times
+
+steps:
+  - name: an order to check out
+    sql:
+      dep: db
+      insert: { table: orders, key: id, row: { id: "${vars.order}", amount: 150000, status: NEW } }
+
+  - name: the customer double-clicks, two checkouts arrive together
+    parallel:
+      times: 2
+      step:
+        http: { method: POST, url: "${vars.api}/checkout", json: { order_id: "${vars.order}" } }
+    expect:
+      count.status.202: 1        # one is accepted…
+      count.status.409: 1        # …the other is told it's already in progress
+
+  - name: the order ends up PAID
+    sql: { dep: db, query: "SELECT status FROM orders WHERE id = ?", args: ["${vars.order}"] }
+    retry: { timeout: 10s, every: 500ms }
+    expect: { rows.0.status: PAID }
+
+  - name: the provider was charged exactly once
+    mock: { name: payments, calls: { route: charge, key: "${vars.order}" } }
+    expect: { count: 1 }

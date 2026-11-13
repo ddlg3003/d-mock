@@ -68,13 +68,14 @@ func TestWriteJUnit(t *testing.T) {
 			{Name: "check", Type: "http", Failures: []string{`json.status: got "A", want "B"`}},
 			{Name: "after", Type: "http", Skipped: true},
 		}},
+		{Scenario: "never ran", File: "s/03.yaml", Duration: "0s", Skipped: true, Steps: []scenario.StepResult{{Name: "skipped: the before_all hook failed", Skipped: true}}},
 	}
 	if err := writeJUnit(p, "suite", reps); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(p)
 	x := string(b)
-	for _, want := range []string{`tests="2" failures="1" time="3.5"`, `<testcase name="ok one" classname="s/01.yaml" time="1.5">`, `message="failed at: check"`, `want &#34;B&#34;`} {
+	for _, want := range []string{`tests="3" failures="1" skipped="1" time="3.500"`, `<skipped message="skipped: the before_all hook failed">`, `<testcase name="ok one" classname="s/01.yaml" time="1.500">`, `message="failed at: check"`, `want &#34;B&#34;`} {
 		if !strings.Contains(x, want) {
 			t.Errorf("junit missing %s:\n%s", want, x)
 		}

@@ -20,6 +20,8 @@ project: __NAME__
 #     remote:
 #       vars: { dsn: "${env.DEV_DB_DSN}" }     # secrets come from your shell, not this file
 #     ready: { tcp: "localhost:13306", timeout: 120s }
+#     after_ready:                             # once a fresh container is ready: your migrations
+#       - go run ./cmd/migrate -dsn "${deps.db.dsn}"
 
 # mocks: the third-party APIs your service calls. The spec is mocks/<name>.yaml.
 mocks:
@@ -33,3 +35,15 @@ mocks:
 #     env: { APP_CONFIG: "${services.app.config}" }
 #     ready: { http: "http://localhost:8080/healthz", timeout: 90s }
 #     depends_on: [partner]
+
+# hooks: steps run around the scenarios (same syntax as scenario steps). See `dmock help spec`.
+# hooks:
+#   before_all: []     # once; its saved values are ${saved.x} in every scenario; if it fails, all SKIP
+#   before_each:       # in every scenario, before its steps
+#     - http: { url: "http://localhost:8080/healthz" }
+#       retry: { timeout: 30s }
+#       expect: { status: 200 }
+#   after_each: []     # in every scenario, after its cleanup
+#   after_all:         # once, at the end, always
+#     - log: { service: app, grep: "panic" }
+#       expect: { count: 0 }
