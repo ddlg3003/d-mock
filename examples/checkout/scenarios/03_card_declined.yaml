@@ -1,0 +1,26 @@
+name: card declined — checkout does not retry a business decline
+vars:
+  order: "ord-${run}"
+  api: "http://localhost:18090"
+
+steps:
+  - name: an order to check out
+    sql:
+      dep: db
+      insert: { table: orders, key: id, row: { id: "${vars.order}", amount: 5000000, status: NEW } }
+
+  - name: the provider declines this order
+    mock: { name: payments, set: { key: "${vars.order}", state: { result: DECLINED } } }
+
+  - name: check out
+    http: { method: POST, url: "${vars.api}/checkout", json: { order_id: "${vars.order}" } }
+    expect: { status: 202 }
+
+  - name: the order ends up FAILED
+    sql: { dep: db, query: "SELECT status FROM orders WHERE id = ?", args: ["${vars.order}"] }
+    retry: { timeout: 10s, every: 500ms }
+    expect: { rows.0.status: FAILED }
+
+  - name: charged once, never retried
+    mock: { name: payments, calls: { route: charge, key: "${vars.order}" } }
+    expect: { count: 1, calls.0.response: { contains: DECLINED } }

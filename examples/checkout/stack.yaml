@@ -1,0 +1,28 @@
+# Use case 1: how does checkout behave when the payment provider misbehaves?
+#   dmock up && dmock run scenarios/ && dmock down
+project: checkout
+
+deps:
+  db:
+    kind: mysql
+    mode: container            # or: dmock --mode db=remote up  (your shared dev database)
+    container:
+      image: mysql:8.0.36
+      ports: ["13306:3306"]
+      env: { MYSQL_ROOT_PASSWORD: root, MYSQL_DATABASE: shop }
+      vars: { dsn: "root:root@tcp(localhost:13306)/shop?timeout=3s&readTimeout=5s&writeTimeout=5s" }
+    remote:
+      vars: { dsn: "${env.DEV_DB_DSN}" }   # the secret stays in your shell, not in this file
+    ready: { tcp: "localhost:13306", timeout: 120s }
+
+mocks:
+  payments: { spec: mocks/payments.yaml, port: 14001 }   # the fake payment provider
+
+services:
+  checkout:                    # the code under test (here a toy; in your repo, your service)
+    dir: service
+    cmd: ["go", "run", "."]
+    env: { CHECKOUT_CONFIG: "${services.checkout.config}" }
+    config: { template: config.tmpl.yaml }
+    ready: { http: "http://localhost:18090/healthz", timeout: 120s }
+    depends_on: [db, payments]

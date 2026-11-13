@@ -1,0 +1,37 @@
+# Use case 2: does checkout survive launch-day load inside its pod's limits?
+#   dmock -f stack.load.yaml up && dmock -f stack.load.yaml run scenarios-load/ && dmock -f stack.load.yaml down
+# Same pieces as stack.yaml, except: checkout runs as a container with the pod's CPU/memory
+# limits, the provider is as slow as the real one, and the DB is always local (load never
+# goes to a shared server).
+project: checkout-load
+
+deps:
+  db:
+    kind: mysql
+    mode: container
+    container:
+      image: mysql:8.0.36
+      ports: ["13307:3306"]
+      env: { MYSQL_ROOT_PASSWORD: root, MYSQL_DATABASE: shop }
+      vars: { dsn: "root:root@tcp(localhost:13307)/shop" }
+    ready: { tcp: "localhost:13307", timeout: 120s }
+
+mocks:
+  payments: { spec: mocks/payments-slow.yaml, port: 14002 }
+
+services:
+  checkout:
+    config: { template: config.container.tmpl.yaml }
+    container:
+      build:
+        # in your repo this is just your Dockerfile; here the binary is built on the host first
+        pre: ["sh", "-c", "CGO_ENABLED=0 GOOS=linux go build -o examples/checkout/service/checkout-linux ./examples/checkout/service"]
+        context: ../..
+        dockerfile: examples/checkout/Dockerfile
+      cpus: "0.5"              # = resources.limits.cpu: 500m
+      memory: 128m             # = resources.limits.memory: 128Mi (no swap: over it = OOM kill)
+      ports: ["18091:18090"]
+      env: { CHECKOUT_CONFIG: /config/checkout.yaml }
+      mounts: ["${services.checkout.config}:/config/checkout.yaml:ro"]
+    ready: { http: "http://localhost:18091/healthz", timeout: 120s }
+    depends_on: [db, payments]

@@ -1,0 +1,33 @@
+name: provider times out once — checkout retries and charges exactly once
+vars:
+  order: "ord-${run}"              # unique per run: runs never collide, even on a shared DB
+  api: "http://localhost:18090"
+
+steps:
+  - name: an order to check out
+    sql:
+      dep: db
+      insert: { table: orders, key: id, row: { id: "${vars.order}", amount: 150000, status: NEW } }
+
+  - name: the provider's first answer comes too late
+    mock: { name: payments, fault: { key: "${vars.order}", fault: timeout, times: 1 } }
+
+  - name: check out
+    http: { method: POST, url: "${vars.api}/checkout", json: { order_id: "${vars.order}" } }
+    expect: { status: 202 }
+
+  - name: the order ends up PAID
+    sql: { dep: db, query: "SELECT status FROM orders WHERE id = ?", args: ["${vars.order}"] }
+    retry: { timeout: 20s, every: 1s }   # checkout charges in the background: poll until done
+    expect: { rows.0.status: PAID }
+
+  - name: two charge calls, both with the same idempotency key
+    mock: { name: payments, calls: { route: charge, key: "${vars.order}" } }
+    expect:
+      count: 2
+      calls.0.json.idempotency_key: "pay-${vars.order}"
+      calls.1.json.idempotency_key: "pay-${vars.order}"
+
+  - name: the timeout is in the log for on-call
+    log: { service: checkout, grep: "order=${vars.order} charge attempt 1 failed" }
+    expect: { count: 1 }

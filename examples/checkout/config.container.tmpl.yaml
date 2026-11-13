@@ -1,0 +1,7 @@
+# Inside a container, localhost is the container itself: reach the DB and the fake provider
+# on the host through ${host}.
+listen: ":18090"
+db_dsn: "root:root@tcp(${host}:13307)/shop?timeout=3s&readTimeout=5s&writeTimeout=5s"
+payments_url: "http://${host}:14002"
+payments_timeout: 2s
+charge_attempts: 3

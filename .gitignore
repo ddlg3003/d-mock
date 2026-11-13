@@ -1,3 +1,4 @@
 /bin/
 .dmock/
 /examples/orders/toy/orders-linux
+/examples/checkout/service/checkout-linux

@@ -1,0 +1,10 @@
+# payments.yaml, but every charge takes 300 ms, like the real provider under load.
+routes:
+  - id: charge
+    method: POST
+    path: charges
+    key: "bodyRaw 'order_id'"
+    state: { result: SUCCEEDED }
+    latency: 300ms
+    headers: { Content-Type: application/json }
+    body: '{"charge_id":"ch-${key}","status":"${state.result}"}'

@@ -1,0 +1,13 @@
+# The fake payment provider. Every request is keyed by its order_id, so each test order can
+# get its own answer (`set`) or its own failure (`fault`).
+routes:
+  - id: charge
+    method: POST
+    path: charges
+    key: "bodyRaw 'order_id'"
+    state: { result: SUCCEEDED }          # default answer
+    headers: { Content-Type: application/json }
+    body: '{"charge_id":"ch-${key}","status":"${state.result}"}'
+    faults:
+      timeout: { latency: 5s }            # longer than checkout's 2s client timeout
+      http500: { status: 500, body: '{"error":"provider down"}' }

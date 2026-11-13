@@ -1,0 +1,26 @@
+name: provider down for good — checkout gives up after 3 attempts and marks the order FAILED
+vars:
+  order: "ord-${run}"
+  api: "http://localhost:18090"
+
+steps:
+  - name: an order to check out
+    sql:
+      dep: db
+      insert: { table: orders, key: id, row: { id: "${vars.order}", amount: 99000, status: NEW } }
+
+  - name: the provider answers HTTP 500 until cleared
+    mock: { name: payments, fault: { key: "${vars.order}", fault: http500 } }
+
+  - name: check out
+    http: { method: POST, url: "${vars.api}/checkout", json: { order_id: "${vars.order}" } }
+    expect: { status: 202 }
+
+  - name: the order ends up FAILED
+    sql: { dep: db, query: "SELECT status FROM orders WHERE id = ?", args: ["${vars.order}"] }
+    retry: { timeout: 15s, every: 500ms }
+    expect: { rows.0.status: FAILED }
+
+  - name: exactly 3 attempts, no more
+    mock: { name: payments, calls: { route: charge, key: "${vars.order}" } }
+    expect: { count: 3 }

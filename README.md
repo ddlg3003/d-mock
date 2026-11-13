@@ -44,6 +44,15 @@ scenario.yaml ──dmock run──▶  sql · kafka ·     mock set · fault ·
 - **Readable failures.** Failed checks are reported in words, e.g. `json.status: got "WAITING", want "APPROVED"`.
 - **Built-in docs.** `dmock help guide` works without the repo.
 
+## Examples
+
+Start here if you want to see how you'd use d-mock on your own service:
+
+- **[`examples/checkout`](examples/checkout)**: a service that charges orders through a payment provider.
+  - *"If the provider times out, do we charge twice?"*: a scenario breaks the provider for one order, then checks the DB, every call the provider received, and the logs.
+  - *"Will it survive launch day inside its pod?"*: k6 load against the service in a container limited to 500m CPU and 128Mi. It checks p95, errors, OOM, and that every accepted checkout really got charged.
+- **[`examples/orders`](examples/orders)**: a callback racing a poll, faults and timeouts, plus a real OOM kill under a memory limit. This is the repo's own end-to-end test (`make e2e`).
+
 ## Install
 
 ```bash
