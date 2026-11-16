@@ -576,8 +576,20 @@ Take part of the stack down or bring it back, to test outages and crash recovery
 | `restart: NAME` | stop then start (a mock restarts with its state and calls cleared) |
 
 NAME is a dep (container mode only; a `remote` dep is refused), mock or service. **Result:**
-`action`, `name`, `kind`, `state`. Whatever a scenario took down is started again after the run,
-before the rest of the cleanup.
+`action`, `name`, `kind`, `state`.
+
+**After the run, every part a scenario touched is put back as it was before the scenario.** The
+first `stack` step on a part records whether it was running; later steps on it don't change that
+record. In cleanup, before anything else:
+
+1. parts that were **not** running and are running now are stopped (e.g. a worker the scenario
+   started);
+2. then parts that **were** running and are down now are started again (e.g. the database a
+   scenario stopped).
+
+Stopping first means two parts that share a port or a queue (an old and a new worker in a
+deploy-swap test) are never up together during cleanup. Parts a scenario never touched with a
+`stack` step are left alone.
 
 ```yaml
 - stack: { stop: db }
@@ -691,5 +703,6 @@ under `mocks:` (with `body_file` + `encode` or a `codec` for encoded payloads).
 - **`sql.insert`** rows are deleted after the run.
 - **Temporal workflows** a run started are terminated if still running.
 - **Mock state and faults** a run set are reset.
-- **Stack parts** a run stopped or killed are started again, first.
+- **Stack parts** a run touched with `stack` steps are put back as they were before it, first:
+  what it started is stopped, what it took down is started.
 - **`--keep`** skips the automatic cleanup to inspect a failure; `cleanup:` steps still run.

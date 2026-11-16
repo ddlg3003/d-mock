@@ -99,7 +99,7 @@ These came up in real use. Check them before you blame the code under test.
 8. **An `exec` step passed although the command failed.** `exec` passes on any exit code unless you `expect: { exit: 0 }`. Its `stdout` keeps the trailing newline, so `save: { x: stdout }` breaks a later shell line: print with `printf`, or print JSON and save `json.x`.
 9. **A `log` step can't see `up` output.** It reads only lines written since the scenario started. Check what `after_ready` printed with `dmock logs NAME`.
 10. **A race test passes and proves nothing.** Two sequential requests aren't a race: use `parallel` so they arrive together, and `repeat` the scenario a few times. Check `count.<field>.<value>`, not `results.0`, since either branch may win.
-11. **A step after an outage fails.** After `stack: { start: db }` the service may need a moment to reconnect: put `retry` on the next check. Whatever a scenario stops comes back after the run anyway.
+11. **A step after an outage fails.** After `stack: { start: db }` the service may need a moment to reconnect: put `retry` on the next check. After the run, every part a `stack` step touched is put back as it was before the scenario: started again if it was up, stopped if the scenario started it.
 12. **The payload is encoded or encrypted, so you reached for a raw Mockoon environment or a hand-written fake server.** Don't: you would lose `mock set`, `fault`, `calls` and cleanup. Keep it a d-mock mock:
     - fixed answers per state: `body_file` + `encode` (run once at start), one `variants` entry per state;
     - answers that must echo the request (an id, a signature over its nonce, a fresh timestamp), or requests you need to read: a `codec` with `decode`/`encode` commands, run per request.
@@ -119,4 +119,4 @@ These came up in real use. Check them before you blame the code under test.
 - A suite's `.dmock/` belongs to that suite. Two stack files in one folder (the old layout) share it, so only one can be up at a time; d-mock refuses to act on another project's running state. Use nested suites instead.
 - `mock set` / `mock fault` (CLI and steps) reject a state field or fault the spec doesn't declare, and unknown CLI flags are an error, so typos fail loudly.
 - `down` never touches remote deps.
-- After every run, dmock starts again what it stopped, deletes the rows it inserted, terminates the workflows it started and resets the mock state it set. Pass `--keep` only to inspect a failure, then clean up by hand.
+- After every run, dmock puts back what `stack` steps changed (as it was before the scenario), deletes the rows it inserted, terminates the workflows it started and resets the mock state it set. Pass `--keep` only to inspect a failure, then clean up by hand.

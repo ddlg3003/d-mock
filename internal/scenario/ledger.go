@@ -25,6 +25,19 @@ type ledger struct {
 	items []undo
 }
 
+// touched reports whether a stack item for this part is already recorded (its state before
+// the scenario is the first one seen).
+func (l *ledger) touched(name string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, x := range l.items {
+		if x.Kind == "stack" && x.Mock == name {
+			return true
+		}
+	}
+	return false
+}
+
 func (l *ledger) add(u undo) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -39,14 +52,18 @@ func (l *ledger) add(u undo) {
 	l.items = append(l.items, u)
 }
 
-// undo runs in reverse order; every item is attempted even if an earlier one fails. Parts of
-// the stack a scenario took down come back first: deleting rows needs the database up.
+// undo runs in reverse order; every item is attempted even if an earlier one fails. The stack
+// is put back first (deleting rows needs the database up): parts the scenario started are
+// stopped before parts it took down are started, so two of them sharing a port or a queue are
+// never up together.
 func (l *ledger) undo(ctx context.Context, ru *run) []StepResult {
 	var out []StepResult
 	order := make([]undo, 0, len(l.items))
-	for _, u := range l.items {
-		if u.Kind == "stack" {
-			order = append(order, u)
+	for _, want := range []string{"down", "up"} {
+		for _, u := range l.items {
+			if u.Kind == "stack" && u.Value == want {
+				order = append(order, u)
+			}
 		}
 	}
 	for i := len(l.items) - 1; i >= 0; i-- {
@@ -68,8 +85,8 @@ func (l *ledger) undo(ctx context.Context, ru *run) []StepResult {
 			res.Name = fmt.Sprintf("auto: clear mock %s state for %s", u.Mock, u.Key)
 			err = ru.clearMockState(u)
 		case "stack":
-			res.Name = "auto: make sure " + u.Mock + " is running again"
-			err = ru.restoreStack(ctx, u.Mock)
+			res.Name = stackUndoName(u)
+			err = ru.restoreStack(ctx, u)
 		case "mock-fault":
 			res.Name = fmt.Sprintf("auto: clear mock %s fault for %s", u.Mock, u.Key)
 			if admin, _, aerr := ru.r.Stack.MockAdmin(u.Mock); aerr != nil {

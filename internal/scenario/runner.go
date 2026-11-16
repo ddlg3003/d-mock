@@ -55,6 +55,20 @@ type Runner struct {
 
 	suiteSaved map[string]any    // what before_all saved, seen by every scenario as ${saved.x}
 	hooks      map[string][]Step // suite hooks, set by RunSuite
+	control    stackControl      // stack steps; nil = Stack (tests swap in a fake)
+}
+
+// stackControl is what stack steps and their cleanup need from the stack.
+type stackControl interface {
+	Control(ctx context.Context, action, name string) (stack.Item, error)
+	Running(name string) (bool, error)
+}
+
+func (r *Runner) stackCtl() stackControl {
+	if r.control != nil {
+		return r.control
+	}
+	return r.Stack
 }
 
 // run is the state of one scenario execution.

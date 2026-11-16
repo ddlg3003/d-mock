@@ -9,8 +9,10 @@ import (
 )
 
 // stack: {stop|start|restart|kill: NAME} — take a dep (container mode), mock or service down
-// or bring it back, to test outages and crash recovery. Whatever a scenario takes down is
-// started again after the run (before the rest of the cleanup, which may need it).
+// or bring it up, to test outages, crash recovery and deploy swaps. The first time a scenario
+// touches a part, d-mock records whether it was running; after the run it puts it back that
+// way: started again if it was up, stopped if the scenario started it. This happens before the
+// rest of the cleanup, which may need it.
 func (ru *run) execStack(ctx context.Context, a map[string]any) (map[string]any, error) {
 	var action, name string
 	for _, act := range stack.ControlActions {
@@ -24,10 +26,19 @@ func (ru *run) execStack(ctx context.Context, a map[string]any) (map[string]any,
 	if action == "" {
 		return nil, fmt.Errorf("stack: set one of stop, start, restart, kill (with the dep, mock or service name)")
 	}
-	if action != "start" {
-		ru.ledger.add(undo{Kind: "stack", Mock: name})
+	ctl := ru.r.stackCtl()
+	if !ru.ledger.touched(name) {
+		up, err := ctl.Running(name)
+		if err != nil {
+			return nil, err
+		}
+		state := "down"
+		if up {
+			state = "up"
+		}
+		ru.ledger.add(undo{Kind: "stack", Mock: name, Value: state})
 	}
-	it, err := ru.r.Stack.Control(ctx, action, name)
+	it, err := ctl.Control(ctx, action, name)
 	out := map[string]any{"action": action, "name": name, "kind": it.Kind, "state": it.State}
 	if it.Message != "" {
 		out["message"] = it.Message
@@ -35,12 +46,25 @@ func (ru *run) execStack(ctx context.Context, a map[string]any) (map[string]any,
 	return out, err
 }
 
-// restoreStack starts a part of the stack again if a scenario left it down.
-func (ru *run) restoreStack(ctx context.Context, name string) error {
-	up, err := ru.r.Stack.Running(name)
-	if err != nil || up {
+// restoreStack puts a part of the stack back to how it was before the scenario touched it.
+func (ru *run) restoreStack(ctx context.Context, u undo) error {
+	ctl := ru.r.stackCtl()
+	up, err := ctl.Running(u.Mock)
+	if err != nil {
 		return err
 	}
-	_, err = ru.r.Stack.Control(ctx, "start", name)
+	switch {
+	case u.Value == "up" && !up:
+		_, err = ctl.Control(ctx, "start", u.Mock)
+	case u.Value == "down" && up:
+		_, err = ctl.Control(ctx, "stop", u.Mock)
+	}
 	return err
+}
+
+func stackUndoName(u undo) string {
+	if u.Value == "down" {
+		return "auto: stop " + u.Mock + " (it was not running before the scenario)"
+	}
+	return "auto: make sure " + u.Mock + " is running again"
 }

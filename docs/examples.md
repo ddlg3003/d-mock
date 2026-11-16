@@ -175,8 +175,25 @@ steps:
 ```
 
 The same shape answers "does the worker resume after a crash?" (`stack: { kill: worker }`, then
-`start`) and "does it survive the third-party API restarting?" (`stack: { restart: payments }`). Whatever
-a scenario leaves down is started again after the run.
+`start`) and "does it survive the third-party API restarting?" (`stack: { restart: payments }`). After the
+run, every part the scenario touched is put back as it was: started again if it was up before,
+stopped if the scenario started it.
+
+A deploy swap, with neither worker running before the scenario (`dmock up --only db,queue`):
+
+```yaml
+name: deploy swap — the new worker picks up what the old one left
+steps:
+  - stack: { start: worker-old }
+  - http: { method: POST, url: "${vars.api}/jobs", json: { id: "${vars.job}" } }
+  - stack: { stop: worker-old }                 # old version goes away mid-flight
+  - stack: { start: worker-new }                # new version takes over the same queue
+  - sql: { dep: db, query: "SELECT status FROM jobs WHERE id = ?", args: ["${vars.job}"] }
+    retry: { timeout: 30s }
+    expect: { rows.0.status: DONE }
+# cleanup: stops worker-old and worker-new (neither was running before), so they are never
+# left on the same queue
+```
 
 ## Question: is the event published?
 
